@@ -290,11 +290,14 @@ fn encode(channel: u32, kind: u8, payload: &[u8]) -> Vec<u8> {
     out
 }
 
-fn read_frame(r: &mut impl Read) -> Option<(u32, u8, Vec<u8>)> {
+fn read_frame(r: &mut impl Read, limit: usize) -> Option<(u32, u8, Vec<u8>)> {
     let mut h = [0u8; HEADER];
     r.read_exact(&mut h).ok()?;
     let channel = u32::from_le_bytes(h[0..4].try_into().unwrap());
     let len = u32::from_le_bytes(h[5..9].try_into().unwrap()) as usize;
+    // Core's maximum whole wire payload. Reject before allocating, including
+    // malformed/untrusted peers on the experimental browser connection.
+    if len > limit { return None; }
     let mut payload = vec![0; len];
     r.read_exact(&mut payload).ok()?;
     Some((channel, h[4], payload))
@@ -322,7 +325,12 @@ fn connect_error(stderr: &str) -> Option<ConnectError> {
 
 impl Core {
     /// Connects to the user's core (starting it if needed) and switches to framed mode.
-    pub fn connect() -> Result<Arc<Core>> {
+    pub fn connect() -> Result<Arc<Core>> { Self::connect_limited(16 * 1024 * 1024) }
+
+    /// A distinct viewer connection with a whole-message browser response bound.
+    pub fn connect_browser() -> Result<Arc<Core>> { Self::connect_limited(crate::browser::MAX_MESSAGE) }
+
+    fn connect_limited(frame_limit: usize) -> Result<Arc<Core>> {
         let mut child = crate::spawn::command(crate::core_bin::path())
             .arg("connect")
             .stdin(Stdio::piped())
@@ -347,7 +355,8 @@ impl Core {
         let hello = (|| -> Result<Value> {
             stdin.write_all(b"{\"jsonrpc\":\"2.0\",\"id\":0,\"method\":\"hello\",\"params\":{\"framed\":true}}\n")?;
             let mut line = String::new();
-            reader.read_line(&mut line)?;
+            (&mut reader).take(frame_limit as u64 + 1).read_line(&mut line)?;
+            if line.len() > frame_limit || !line.ends_with('\n') { bail!("oversized or incomplete core hello"); }
             serde_json::from_str(&line).context("bad hello reply from core")
         })();
         let hello = match hello {
@@ -384,9 +393,10 @@ impl Core {
         });
         std::thread::Builder::new().name("hc-reader".into()).spawn(move || {
             let _lost_tx = lost_tx;
-            while let Some((channel, kind, payload)) = read_frame(&mut reader) {
+            while let Some((channel, kind, payload)) = read_frame(&mut reader, frame_limit) {
                 let mut r = routes.lock().unwrap();
                 if channel == 0 {
+                    if kind != DATA { break; }
                     let Ok(msg) = serde_json::from_slice::<Value>(&payload) else { continue };
                     let Some(id) = msg.get("id").and_then(Value::as_u64) else { continue };
                     if let Some(tx) = r.replies.remove(&id) {
@@ -397,6 +407,9 @@ impl Core {
                     }
                     continue;
                 }
+                // Revision-2 browser connections are exclusively channel-0 pull
+                // RPCs. Never collect unsolicited stream frames in `early`.
+                if frame_limit == crate::browser::MAX_MESSAGE { break; }
                 let item = match kind {
                     DATA => Stream::Data(payload),
                     CLOSE => Stream::Closed(serde_json::from_slice(&payload).unwrap_or(Value::Null)),
@@ -583,6 +596,16 @@ pub fn offline() -> Arc<Core> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wire_length_is_bounded_before_payload_allocation() {
+        let oversized = encode(0, DATA, &[1, 2, 3]);
+        assert!(read_frame(&mut oversized.as_slice(), 2).is_none());
+        let mut header = encode(0, DATA, &[]);
+        header[5..9].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert!(read_frame(&mut header.as_slice(), crate::browser::MAX_MESSAGE).is_none());
+        assert_eq!(read_frame(&mut oversized.as_slice(), 3).unwrap().2, [1, 2, 3]);
+    }
 
     #[test]
     fn startup_errors_keep_the_cores_message_and_recovery_hint() {

@@ -33,6 +33,7 @@ mod sprites;
 mod telemetry;
 mod feedback;
 mod terminal;
+mod browser;
 mod update;
 mod update_notes;
 mod vt;

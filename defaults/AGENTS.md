@@ -36,6 +36,26 @@ You can't: use HTML, CSS, a web view, Node APIs or `setTimeout`; draw
 outside your block except through overlays; change how a terminal itself
 draws text; read or change other mods' code at run time.
 
+## Experimental native workspace browser (personal fork)
+
+The native **Browser** button opens a human-operated streamed Chromium panel for
+an explicitly selected local workspace. It starts lazily, only after the person
+opens it. The workspace's core must opt in with `HC_BROWSER_CHROME` pointing to a
+sandbox-capable full Chromium and implement browser wire revision 2; otherwise the
+panel reports an unsupported error. Remote workspaces currently report that a
+dedicated viewer connection is required, with no local fallback.
+
+The address field navigates explicitly; Reload, back/forward and inner tabs are
+native controls. DevTools is explicitly opened and docked below the page when
+supported by core. Hiding the panel does not stop Chromium. **Ctrl+Escape** focuses
+the address field without sending Escape into the page/debugger. Configured Herdr
+bindings retain precedence. Physical key codes, IME and HiDPI are not yet verified.
+This is an experimental Stage A surface, not the complete browsing product.
+
+Pages and mods receive no browser/CDP bridge. There are no agent-facing browser
+inspection, JavaScript, navigation or input commands. Do not use app automation
+or mod APIs to operate the person's browser; it is a human desktop facility.
+
 ## What mods are written in
 
 Mods use **gpui-kit** (its gpui-shell): JavaScript that describes **GPUI**

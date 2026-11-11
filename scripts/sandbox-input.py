@@ -69,7 +69,9 @@ def button(n, down):
 
 
 def key(sym, mods=()):
-    code = d.keysym_to_keycode(XK.string_to_keysym(sym))
+    code = d.keysym_to_keycode(sym if isinstance(sym, int) else XK.string_to_keysym(sym))
+    if not code:
+        sys.exit(f"keysym is not available in the private X keymap: {sym}")
     held = [d.keysym_to_keycode(XK.string_to_keysym(m)) for m in mods]
     for m in held:
         xtest.fake_input(d, X.KeyPress, m)
@@ -125,8 +127,12 @@ if sys.argv[1] in ("type", "key"):
     for ch in sys.argv[2] if sys.argv[1] == "type" else "":
         name = {" ": "space", ".": "period", "/": "slash", ":": "colon", "-": "minus"}.get(ch, ch)
         keysym = XK.string_to_keysym(name)
+        # Punctuation such as '=' and quotes has no single-character Xlib name.
+        # ASCII/Latin-1 keysyms equal the character code; never send keycode zero.
+        if not keysym:
+            keysym = ord(ch) if ord(ch) <= 255 else 0x01000000 | ord(ch)
         shifted = d.keysym_to_keycodes(keysym) and any(i % 2 for _, i in d.keysym_to_keycodes(keysym))
-        key(name, ["Shift_L"] if shifted or ch.isupper() else [])
+        key(keysym, ["Shift_L"] if shifted or ch.isupper() else [])
     time.sleep(0.1)
     sys.exit(0)
 

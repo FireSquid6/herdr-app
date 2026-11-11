@@ -346,6 +346,8 @@ struct Watched {
 
 pub struct AppWindow {
     core: Arc<Core>,
+    browsers: HashMap<String, Entity<crate::browser::panel::Panel>>,
+    browser_shown: bool,
     runtime: Option<Rc<ShellRuntime>>,
     chrome: Node,
     /// Which layout `chrome` is (`layouts/<name>.json`).
@@ -470,6 +472,8 @@ impl AppWindow {
         let seen = std::fs::read_to_string(file("seen.json")).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
         let mut w = AppWindow {
             core,
+            browsers: HashMap::new(),
+            browser_shown: false,
             runtime,
             chrome: default_layout("main"),
             layout_name: "main".into(),
@@ -1575,6 +1579,16 @@ impl AppWindow {
     /// else the window, where the app's keys work.
     fn restore_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let dialog = self.overlays.iter().rev().find(|o| o.kind.modal_keys()).map(|o| o.focus.clone());
+        if dialog.is_none() && self.browser_shown {
+            if let Some(space) = self.model.active_space() {
+                let key = format!("{}:{}", space.machine.as_deref().unwrap_or(""), space.id);
+                if let Some(panel) = self.browsers.get(&key) {
+                    let focus = panel.read(cx).focus_handle().clone();
+                    focus.focus(window, cx);
+                    return;
+                }
+            }
+        }
         // A mod block holding the keyboard gets it back (a popup over it closed).
         if dialog.is_none() && self.focused_block.as_ref().is_some_and(|b| self.mod_block_shown(b)) {
             self.focus.focus(window, cx);
@@ -4921,6 +4935,9 @@ impl Render for AppWindow {
         let tracker = self.float_tracker(cx);
         let win_tracker = self.window_tracker(cx);
         let pane_drag = self.pane_drag_layer(cx);
+        let browser_key = self.model.active_space().map(|s| format!("{}:{}", s.machine.as_deref().unwrap_or(""), s.id));
+        for (key, panel) in &self.browsers { panel.read(cx).visible(self.browser_shown && browser_key.as_ref() == Some(key)); }
+        let browser = browser_key.as_ref().and_then(|key| self.browsers.get(key)).filter(|_| self.browser_shown).cloned();
         div()
             .id("herdr")
             .track_focus(&self.focus)
@@ -4993,10 +5010,24 @@ impl Render for AppWindow {
                 }
             }))
             .child(tree)
+            .children(browser.map(|panel| div().absolute().top(px(36.)).bottom(px(28.)).left_0().right_0().child(panel)))
             .children(overlays)
             .children(tracker)
             .children(win_tracker)
             .child(pane_drag)
+            .child(div().id("toggle-workspace-browser").absolute().bottom_0().right(px(12.)).px_3().py_1().bg(rgb(0x354358)).cursor_pointer()
+                .child(if self.browser_shown { "Hide Browser" } else { "Browser" })
+                .on_click(cx.listener(|this, _, _, cx| {
+                    if !this.browser_shown {
+                        if let Some(space) = this.model.active_space() {
+                            let workspace = space.id.clone(); let machine = space.machine.clone().unwrap_or_default();
+                            let key = format!("{machine}:{workspace}");
+                            this.browsers.entry(key).or_insert_with(|| cx.new(|cx| crate::browser::panel::Panel::new(workspace, machine, cx)));
+                        }
+                    }
+                    this.browser_shown = !this.browser_shown;
+                    cx.notify();
+                })))
             .child(crate::bench::frame_end())
     }
 }

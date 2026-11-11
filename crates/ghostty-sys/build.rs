@@ -37,6 +37,9 @@ fn main() {
         // Only the static library is linked. Ghostty builds the xcframework whenever it finds
         // xcodebuild, and with only the Command Line Tools /usr/bin/xcodebuild exists but fails.
         .args(["build", "-Demit-lib-vt", "-Demit-xcframework=false", "-Doptimize=ReleaseFast"])
+        // Respect Cargo's job budget instead of starting one Zig worker per CPU
+        // alongside the Rust compiler (notably on small integration hosts).
+        .arg(format!("-j{}", std::env::var("NUM_JOBS").unwrap_or_else(|_| "2".into())))
         .arg(format!("-Dtarget={}", zig_target(&std::env::var("TARGET").unwrap())))
         .arg("--prefix")
         .arg(out.join("zig-out"))

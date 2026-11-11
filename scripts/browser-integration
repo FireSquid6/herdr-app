@@ -1,0 +1,123 @@
+#!/usr/bin/env bash
+# Reproducible private native browser gate. This runner owns only its own sandbox
+# and fixture process; never use it against an installed core or a real display.
+set -euo pipefail
+here=$(cd "$(dirname "$0")/.." && pwd)
+source "$HOME/.local/share/herdr-fork-tools/env.sh"
+# These are transport selectors, not harmless terminal metadata. Never inherit
+# the parent agent's live-core socket into any test child.
+unset HC_SOCKET HC_SCOPE HC_TERMINAL_SOCKET HC_TERMINAL_ID
+export CARGO_BUILD_JOBS=2 CARGO_PROFILE_DEV_DEBUG=1 CARGO_PROFILE_TEST_DEBUG=1
+core=$here/../herdr-core/target/debug/herdr-core
+case ${1:-} in
+  up|preflight)
+    action=$1
+    [[ -x $core ]] || { echo "Build sibling feature core first: $core" >&2; exit 1; }
+    umask 077
+    run=$(mktemp -d /var/tmp/ha.XXXXXX)
+    evidence=$(mktemp -d /var/tmp/ha-evidence.XXXXXX)
+    mkdir -p "$run/home"
+    printf '%s\n' "$evidence" > "$run/evidence"
+    # Persist only nonsecret scratch context; no account credentials involved.
+    printf 'export HOME=%q HERDR_APP_SANDBOX=browser-mvp HERDR_APP_SANDBOX_ROOT=%q HERDR_APP_SANDBOX_CORE=%q HC_BROWSER_CHROME=/opt/google/chrome/chrome\n' "$run/home" "$run/s" "$core" > "$run/env"
+    source "$run/env"
+    mkdir -p "$run/s" "$run/s/bin" "$run/s/runtime" "$run/s/tmp" "$run/s/state" "$run/s/config" "$run/s/cache" "$run/s/data"
+    ln -s -- "$core" "$run/s/bin/hc"
+    printf '%s:browser-mvp\n' "$(id -u)" > "$run/s/.sandbox-owner"
+    export HC_SESSION=herdr-app-browser-mvp XDG_STATE_HOME=$run/s/state XDG_RUNTIME_DIR=$run/s/runtime
+    export XDG_CONFIG_HOME=$run/s/config XDG_CACHE_HOME=$run/s/cache XDG_DATA_HOME=$run/s/data TMPDIR=$run/s/tmp
+    cleanup_failed_up() {
+      result=$?
+      if (( result != 0 )); then
+        cp "$run/s/app.log" "$evidence/app.log" 2>/dev/null || true
+        "$here/scripts/sandbox" down >> "$evidence/cleanup.txt" 2>&1 || true
+        if [[ -f $run/fixture-pid ]]; then kill "$(<"$run/fixture-pid")" 2>/dev/null || true; fi
+        echo "up failed ($result); owned cleanup attempted; artifacts $evidence; scratch $run" >&2
+      fi
+    }
+    trap cleanup_failed_up EXIT
+    python3 - "$core" <<'PY' > "$evidence/negotiate.json"
+import json,struct,subprocess,sys
+p=subprocess.Popen([sys.argv[1],'connect'],stdin=subprocess.PIPE,stdout=subprocess.PIPE)
+def exact(n):
+    result=b''
+    while len(result)<n:
+        part=p.stdout.read(n-len(result))
+        if not part: raise RuntimeError('core disconnected during preflight')
+        result+=part
+    return result
+try:
+    p.stdin.write(b'{"jsonrpc":"2.0","id":0,"method":"hello","params":{"framed":true}}\n');p.stdin.flush()
+    hello=json.loads(p.stdout.readline());print(json.dumps({'hello':hello}))
+    data=json.dumps({'jsonrpc':'2.0','id':1,'method':'browser.negotiate','params':{'revision':2,'client':'herdr-native'}}).encode()
+    p.stdin.write(struct.pack('<IBI',0,0,len(data))+data);p.stdin.flush()
+    channel,kind,size=struct.unpack('<IBI',exact(9))
+    if channel or kind or size>4194304: raise RuntimeError('invalid preflight reply bounds')
+    reply=json.loads(exact(size));print(json.dumps({'negotiate':reply}))
+    if reply.get('result',{}).get('revision')!=2: raise RuntimeError('feature core has no revision-2 browser capability')
+finally:
+    p.stdin.close()
+    try:p.wait(timeout=5)
+    except subprocess.TimeoutExpired:p.terminate();p.wait(timeout=5)
+PY
+    if [[ $action == preflight ]]; then
+      "$here/scripts/sandbox" down > "$evidence/cleanup.txt" 2>&1
+      trap - EXIT
+      echo "Revision-2 native negotiate PASS (no Chromium launched): $evidence/negotiate.json"
+      exit 0
+    fi
+    python3 - "$here/scripts" "$run" <<'PY' > "$evidence/fixture.log" 2>&1 &
+import http.server, pathlib, sys
+handler=lambda *a,**kw:http.server.SimpleHTTPRequestHandler(*a,directory=sys.argv[1],**kw)
+server=http.server.ThreadingHTTPServer(('127.0.0.1',0),handler)
+pathlib.Path(sys.argv[2]+'/fixture-port').write_text(str(server.server_port))
+server.serve_forever()
+PY
+    echo $! > "$run/fixture-pid"
+    {
+      echo "APP=$(git -C "$here" rev-parse HEAD)"
+      echo "CORE=$(git -C "$here/../herdr-core" rev-parse HEAD)"
+      sha256sum "$core" "$here/target/debug/herdr-app"
+      echo "CORE_BINARY=$core"
+      echo "RUN=$run EVIDENCE=$evidence"
+      git -C "$here" diff --stat
+      git -C "$here/../herdr-core" diff --stat
+      echo 'APP source content (including new files):'
+      git -C "$here" ls-files --cached --others --exclude-standard -z | (cd "$here"; while IFS= read -r -d '' file; do [[ ! -f $file ]] || sha256sum "$file"; done) > "$evidence/app-source-sha256.txt"
+      git -C "$here/../herdr-core" ls-files --cached --others --exclude-standard -z | (cd "$here/../herdr-core"; while IFS= read -r -d '' file; do [[ ! -f $file ]] || sha256sum "$file"; done) > "$evidence/core-source-sha256.txt"
+    } > "$evidence/revisions.txt"
+    "$here/scripts/sandbox" up > "$evidence/start.log" 2>&1 || { echo "Native start FAILED; $evidence/start.log; cleanup: $0 down $run"; exit 1; }
+    "$here/scripts/sandbox" do space.new "{\"name\":\"Chromium gate\",\"folder\":\"$run/home\"}" > "$evidence/workspace-create.json"
+    "$here/scripts/sandbox" status > "$evidence/native-status.json"
+    sha256sum "$core" "$here/target/debug/herdr-app" > "$evidence/running-binaries-sha256.txt"
+    echo "Private native app ready: $run"
+    echo "Evidence: $evidence"
+    echo "Fixture: http://127.0.0.1:$(<"$run/fixture-port")/browser-fixture.html"
+    echo "Drive ONLY via: $0 sandbox $run click|type|key|shot|status|do ..."
+    trap - EXIT
+    # hc owns a process group/cgroup for this terminal. Keep the lifecycle
+    # terminal alive; setsid alone is not independent supervision. `down` ends
+    # the owned fixture after stopping the sandbox, which releases this wait.
+    wait "$(<"$run/fixture-pid")" || true
+    ;;
+  sandbox|down)
+    mode=$1; run=${2:?short scratch root required}; shift 2
+    [[ $run == /var/tmp/ha.* && -d $run && ! -L $run && -f $run/env ]] || { echo 'Not a runner-owned scratch root' >&2; exit 2; }
+    source "$run/env"
+    evidence=$(<"$run/evidence")
+    if [[ $mode == down ]]; then
+      [[ -f $run/s/app.log ]] && cp "$run/s/app.log" "$evidence/app.log"
+      python3 "$here/scripts/browser-cleanup.py" "$run" "$core" > "$evidence/browser-stop-cleanup.json"
+      "$here/scripts/sandbox" down
+      if [[ -f $run/fixture-pid ]]; then
+        pid=$(<"$run/fixture-pid")
+        # Require both the script invocation and private cwd argument to match.
+        if [[ -r /proc/$pid/cmdline ]] && tr '\0' '\n' < "/proc/$pid/cmdline" | grep -Fxq "$run"; then kill "$pid"; fi
+      fi
+      printf 'Owned sandbox and fixture cleanup requested\n' >> "$evidence/cleanup.txt"
+    else
+      "$here/scripts/sandbox" "$@"
+    fi
+    ;;
+  *) echo "Usage: $0 preflight | up | sandbox /var/tmp/ha.XXXXXX <sandbox command> | down /var/tmp/ha.XXXXXX"; exit 2 ;;
+esac
