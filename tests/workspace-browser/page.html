@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Herdr synthetic browser gate</title>
+<style>
+  body { margin: 24px; max-width: 72ch; color: #18212c; background: #fff; font: 16px/1.6 sans-serif; }
+  section { margin-block: 32px; } h1 { font-size: 2rem; line-height: 1.2; } h2 { font-size: 1.5rem; margin-bottom: 8px; }
+  label, output { display: block; } button, input, select, textarea { font: inherit; max-width: 100%; }
+  textarea { box-sizing: border-box; width: 100%; min-height: 96px; }
+  button { margin: 4px 8px 4px 0; } :focus-visible { outline: 3px solid #0753b8; outline-offset: 3px; }
+  ::selection { background: #b8d9ff; color: #101d30; } a { color: #064ca6; text-underline-offset: 3px; }
+  .scroll-test { height: 1000px; background: repeating-linear-gradient(#fff 0 99px, #c7ced7 99px 100px); }
+</style>
+<h1>Herdr synthetic browser gate</h1>
+<p>This is test data, not a product mockup. Use only isolated browser profiles. Nothing here controls Herdr.</p>
+<section>
+  <h2>Typing, selection and disconnect survival</h2>
+  <label for="draft">Unsent draft (must survive hide/disconnect)</label>
+  <textarea id="draft" placeholder="Type a unique test marker"></textarea>
+  <label for="composition">Keyboard layout / IME composition</label>
+  <input id="composition" autocomplete="off">
+  <label for="menu">Native select menu</label>
+  <select id="menu"><option>First item</option><option>Second item</option><option>Third item</option></select>
+  <p id="selection" draggable="true">Select, copy, paste, or drag this synthetic text: Herdr fixture selection.</p>
+  <output id="memory"></output>
+</section>
+<section>
+  <h2>Real DevTools checks</h2>
+  <p id="inspect-me" data-fixture="inspect-this-node">Inspect this node and its data-fixture attribute.</p>
+  <button id="request" type="button">Make test HTTP request</button>
+  <button id="breakpoint" type="button">Run debugger statement</button>
+  <output id="network" aria-live="polite"></output>
+  <output id="debug-result" aria-live="polite"></output>
+</section>
+<section>
+  <h2>Popup, cookie and dialogs</h2>
+  <button id="popup" type="button">Open popup with opener</button>
+  <a href="/popup" target="_blank" rel="opener">Open target=_blank with opener</a>
+  <button id="cookie" type="button">Set synthetic workspace cookie</button>
+  <button id="dialog" type="button">Open JavaScript prompt</button>
+  <button id="permission" type="button">Request geolocation (expect denial)</button>
+  <output id="popup-result" aria-live="polite"></output>
+  <output id="dialog-result" aria-live="polite"></output>
+  <output id="permission-result" aria-live="polite"></output>
+  <output id="cookie-result" aria-live="polite"></output>
+</section>
+<section>
+  <h2>Explicit files</h2>
+  <label for="upload">Select synthetic upload (1 MiB fixture limit)</label>
+  <input id="upload" type="file">
+  <output id="upload-result" aria-live="polite"></output>
+  <a href="/download" download>Download synthetic text file on host</a>
+</section>
+<h2>Scrolling and viewport</h2>
+<output id="viewport"></output>
+<div class="scroll-test" aria-hidden="true"></div>
+<p id="bottom">End of scroll fixture.</p>
+<script>
+  const el = id => document.getElementById(id);
+  // Deliberately memory-only: a reload must change this marker.
+  window.fixtureMemory = crypto.randomUUID();
+  el('memory').textContent = `In-memory marker: ${window.fixtureMemory}`;
+  const viewport = () => el('viewport').textContent = `${innerWidth} × ${innerHeight} CSS px; DPR ${devicePixelRatio}`;
+  addEventListener('resize', viewport); viewport();
+  el('request').onclick = async () => {
+    try { el('network').textContent = JSON.stringify(await (await fetch('/request')).json()); }
+    catch (error) { el('network').textContent = String(error); }
+  };
+  function fixtureDebugStep() {
+    let value = 40;
+    debugger;
+    value += 2; // Step this line with real remote DevTools.
+    el('debug-result').textContent = `Debugger resumed: ${value}`;
+    return value;
+  }
+  el('breakpoint').onclick = fixtureDebugStep;
+  el('popup').onclick = () => window.open('/popup', 'fixture-popup');
+  addEventListener('message', event => {
+    if (event.origin === location.origin && event.data === 'fixture-popup') el('popup-result').textContent = 'Original opener received popup message';
+  });
+  el('dialog').onclick = () => el('dialog-result').textContent = JSON.stringify(prompt('Synthetic prompt', 'fixture-default'));
+  el('cookie').onclick = async () => {
+    await fetch('/cookie'); el('cookie-result').textContent = document.cookie;
+  };
+  el('permission').onclick = () => {
+    if (!navigator.geolocation) { el('permission-result').textContent = 'Geolocation unsupported'; return; }
+    navigator.geolocation.getCurrentPosition(
+      () => el('permission-result').textContent = 'UNEXPECTED GRANT',
+      error => el('permission-result').textContent = `Denied/unavailable: ${error.code}`);
+  };
+  el('upload').onchange = async event => {
+    const file = event.target.files[0];
+    if (!file) return;
+    if (file.size > 1024 * 1024) { el('upload-result').textContent = 'Choose test data no larger than 1 MiB'; return; }
+    try {
+      const response = await fetch('/upload', {method: 'POST', headers: {'X-Fixture-Name': encodeURIComponent(file.name)}, body: file});
+      if (!response.ok) throw new Error(`Upload HTTP ${response.status}`);
+      el('upload-result').textContent = JSON.stringify(await response.json());
+    } catch (error) { el('upload-result').textContent = String(error); }
+  };
+</script>
+</html>

@@ -17,16 +17,26 @@
 #
 # HERDR_APP_SANDBOX=<name> runs a second one side by side. HERDR_APP_BIN runs
 # another herdr-app (an installed copy, to try updates) instead of this build.
+# HERDR_APP_SANDBOX_ROOT selects an absolute scratch directory. It must be new
+# or carry this sandbox's ownership marker; cleanup refuses unrelated folders.
+# HERDR_APP_SANDBOX_CORE selects a test hc binary, without installing it.
 set -euo pipefail
 
 here=$(cd "$(dirname "$0")" && pwd)
 name=${HERDR_APP_SANDBOX:-sandbox}
-root=/var/tmp/herdr-app-$name
+[[ $name =~ ^[a-zA-Z0-9_-]+$ ]] || { echo 'invalid sandbox name' >&2; exit 2; }
+root=${HERDR_APP_SANDBOX_ROOT:-/var/tmp/herdr-app-$name}
+if [[ $root != /* || $root == / || $root == "$HOME" || $root != "$(realpath -m -- "$root")" || -L $root ]]; then
+  echo 'sandbox root must be a canonical absolute scratch path, not /, HOME or a symlink' >&2
+  exit 2
+fi
 bin=${HERDR_APP_BIN:-$here/../target/debug/herdr-app}
 export HC_SESSION=herdr-app-$name HERDR_APP_HOME=$root/home
 # The core's state (machines, terminals) lives and dies with the sandbox:
 # a machine added in one run must not follow the next one there.
 export XDG_STATE_HOME=$root/state
+export XDG_CONFIG_HOME=$root/config XDG_CACHE_HOME=$root/cache XDG_DATA_HOME=$root/data
+export XDG_RUNTIME_DIR=$root/runtime TMPDIR=$root/tmp
 # Sounds would play on the real speakers.
 export HERDR_APP_NO_SOUND=1
 
@@ -35,9 +45,37 @@ if [[ -f $root/display ]]; then export DISPLAY=$(cat "$root/display"); fi
 
 ours() { { tr '\0' '\n' <"/proc/$1/environ"; } 2>/dev/null | grep -qx "HERDR_APP_HOME=$HERDR_APP_HOME"; }
 
+owned_root() {
+  [[ -f $root/.sandbox-owner && ! -L $root/.sandbox-owner ]] &&
+    [[ $(cat "$root/.sandbox-owner") == "$(id -u):$name" ]]
+}
+
+prepare_root() {
+  if [[ -e $root ]] && ! owned_root; then
+    echo "refusing unowned sandbox root: $root (choose a new directory)" >&2
+    return 1
+  fi
+  umask 077
+  mkdir -p "$root" "$XDG_RUNTIME_DIR" "$TMPDIR" "$XDG_CONFIG_HOME" "$XDG_CACHE_HOME" "$XDG_DATA_HOME" "$XDG_STATE_HOME"
+  printf '%s:%s\n' "$(id -u)" "$name" >"$root/.sandbox-owner"
+  chmod 700 "$XDG_RUNTIME_DIR"
+  if [[ -n ${HERDR_APP_SANDBOX_CORE:-} ]]; then
+    [[ $HERDR_APP_SANDBOX_CORE == /* && -x $HERDR_APP_SANDBOX_CORE ]] || {
+      echo 'HERDR_APP_SANDBOX_CORE must be an absolute executable test-core path' >&2; return 1;
+    }
+    mkdir -p "$root/bin"
+    ln -sfn -- "$HERDR_APP_SANDBOX_CORE" "$root/bin/hc"
+  fi
+}
+
+export PATH=$root/bin:$PATH
+
 start_display() {
   mkdir -p "$root"
-  if [[ -f $root/xpid ]] && kill -0 "$(cat "$root/xpid")" 2>/dev/null; then return 0; fi
+  if [[ -f $root/xpid ]] && kill -0 "$(cat "$root/xpid")" 2>/dev/null; then
+    ours "$(cat "$root/xpid")" || { echo 'refusing a compositor PID not owned by this sandbox' >&2; return 1; }
+    return 0
+  fi
   rm -f "$root/weston.log" "$root/display"
   weston --backend=headless --xwayland --socket="herdr-app-$name" --width=1400 --height=900 \
     --log="$root/weston.log" >/dev/null 2>&1 &
@@ -87,19 +125,39 @@ start_window() {
   return 1
 }
 
-input() { uv run -q --with python-xlib python "$here/sandbox-input.py" "$@"; }
+private_display() {
+  if ! owned_root || [[ ! -f $root/xpid || ! -f $root/display ]] || ! ours "$(cat "$root/xpid")"; then
+    echo 'no owned private display; run sandbox up first' >&2
+    return 1
+  fi
+  local saved_display
+  saved_display=$(cat "$root/display")
+  [[ $saved_display =~ ^:[0-9]+$ ]] || { echo 'invalid private display record' >&2; return 1; }
+  export DISPLAY=$saved_display
+}
+
+input() {
+  private_display
+  uv run -q --with python-xlib python "$here/sandbox-input.py" "$@"
+}
 
 case ${1:-} in
-  up | restart) stop_window; start_window ;;
+  up | restart) prepare_root; stop_window; start_window ;;
   down)
+    [[ -e $root ]] || { echo "sandbox $name is already gone"; exit 0; }
+    owned_root || { echo "refusing cleanup of unowned sandbox root: $root" >&2; exit 1; }
     stop_window
     hc server stop >/dev/null 2>&1 || true
-    if [[ -f $root/xpid ]]; then kill "$(cat "$root/xpid")" 2>/dev/null || true; fi
-    rm -rf "$root"
+    if [[ -f $root/xpid ]]; then
+      display_pid=$(cat "$root/xpid")
+      if ours "$display_pid"; then kill "$display_pid" 2>/dev/null || true; fi
+    fi
+    rm -rf -- "$root"
     echo "sandbox $name is gone"
     ;;
   do | status) exec "$bin" "$@" ;;
   shot)
+    private_display
     out=${2:-$root/shot.png}
     import -display "$DISPLAY" -window Herdr "$root/full.png"
     magick "$root/full.png" -resize '1100x>' "$out"
