@@ -122,6 +122,12 @@ to(0, 0)
 time.sleep(0.15)
 
 if sys.argv[1] in ("type", "key"):
+    # Xwayland's virtual device reconnect can leave keyboard focus on its WM
+    # frame/root. There is only one Herdr on this OWNED private display; focus
+    # that actual native window, not the transparent top-left corner.
+    to(650, 400)
+    win.set_input_focus(X.RevertToParent, X.CurrentTime)
+    d.sync()
     if sys.argv[1] == "key":
         key(sys.argv[2], sys.argv[3:])
     for ch in sys.argv[2] if sys.argv[1] == "type" else "":
