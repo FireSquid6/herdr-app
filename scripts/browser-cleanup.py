@@ -21,19 +21,29 @@ root = run / 's'
 if (run.parent != Path('/var/tmp') or not run.name.startswith('ha.') or run.is_symlink()
         or run.stat().st_mode & 0o077 or (root / '.sandbox-owner').read_text().strip() != f'{os.getuid()}:browser-mvp'):
     sys.exit('refusing cleanup outside private runner ownership')
-app_pid = root / 'pid'
-if app_pid.exists():
-    pid = int(app_pid.read_text())
-    envfile = Path(f'/proc/{pid}/environ')
-    if envfile.exists():
-        if f'HERDR_APP_HOME={root}/home'.encode() not in envfile.read_bytes().split(b'\0'):
-            sys.exit('refusing to signal unrelated app PID')
-        fd = os.pidfd_open(pid)
-        os.kill(pid, signal.SIGTERM)
+for app_pid, app_home in [(root/'pid', root/'home'), (run/'viewer2/pid', run/'viewer2/home'),
+                          (run/'viewer2/xpid', run/'viewer2/home')]:
+    if app_pid.exists():
+        pid = int(app_pid.read_text())
+        try:
+            fd = os.pidfd_open(pid)
+        except ProcessLookupError:
+            app_pid.unlink()
+            continue
+        try:
+            environ = Path(f'/proc/{pid}/environ').read_bytes().split(b'\0')
+        except FileNotFoundError:
+            environ = []  # Already exited; pidfd cannot refer to a reused PID.
+        if environ and f'HERDR_APP_HOME={app_home}'.encode() not in environ:
+            sys.exit('refusing to signal unrelated app/display PID')
+        try:
+            signal.pidfd_send_signal(fd, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
         if not select.select([fd], [], [], 10)[0]:
-            sys.exit('owned app did not exit; leaving profiles intact')
+            sys.exit('owned app/display did not exit; leaving profiles intact')
         os.close(fd)
-    app_pid.unlink()
+        app_pid.unlink()
 
 env = os.environ.copy()
 for key in ['HC_SOCKET', 'HC_SCOPE', 'HC_TERMINAL_SOCKET', 'HC_TERMINAL_ID']:

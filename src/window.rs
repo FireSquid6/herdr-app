@@ -347,7 +347,6 @@ struct Watched {
 pub struct AppWindow {
     core: Arc<Core>,
     browsers: HashMap<String, Entity<crate::browser::panel::Panel>>,
-    browser_shown: bool,
     runtime: Option<Rc<ShellRuntime>>,
     chrome: Node,
     /// Which layout `chrome` is (`layouts/<name>.json`).
@@ -473,7 +472,6 @@ impl AppWindow {
         let mut w = AppWindow {
             core,
             browsers: HashMap::new(),
-            browser_shown: false,
             runtime,
             chrome: default_layout("main"),
             layout_name: "main".into(),
@@ -1230,6 +1228,9 @@ impl AppWindow {
                 }
             }
         }
+        // The persisted compatibility envelope is native, never a JavaScript
+        // instance (even if an installed mod happens to use the reserved name).
+        mods.retain(|(_, inst)| inst.name != crate::browser::NATIVE_SLOT);
         (terms, mods)
     }
 
@@ -1293,6 +1294,7 @@ impl AppWindow {
                 }
             }
         }
+        out.retain(|_, inst| inst.name != crate::browser::NATIVE_SLOT);
         out
     }
 
@@ -1577,9 +1579,27 @@ impl AppWindow {
     /// mod hidden but kept alive, a closed pane, a hidden mod focusing itself on a
     /// reload), it goes to the top dialog, else the shown agent or focused pane,
     /// else the window, where the app's keys work.
+    fn browser_selected(&self) -> bool { self.model.active_tab().is_some_and(crate::browser::is_outer) }
+
+    fn open_browser(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(space)=self.model.active_space() else{return};
+        let workspace=space.id.clone();let machine=space.machine.clone().unwrap_or_default();
+        let existing=space.tabs.iter().find(|t|crate::browser::is_outer(t)).map(|t|t.id.clone());
+        if let Some(id)=existing {self.model.select_tab(&id);} else {
+            let on=(!machine.is_empty()).then_some(machine.as_str());
+            let tab=self.model.fresh_id_on("tb",on);
+            let pane=self.model.fresh_id_on("p",on);
+            self.model.add_tab(&workspace,Tab::with_pane(&tab,"Browser",Node::block(pane,Content::Mod{name:crate::browser::NATIVE_SLOT.into(),props:Value::Null})));
+        }
+        let key=format!("{machine}:{workspace}");
+        self.browsers.entry(key.clone()).or_insert_with(||cx.new(|cx|crate::browser::panel::Panel::new(workspace,machine,cx)));
+        self.sync(window,cx);
+        let focus=self.browsers[&key].read(cx).focus_handle().clone();focus.focus(window,cx);
+    }
+
     fn restore_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let dialog = self.overlays.iter().rev().find(|o| o.kind.modal_keys()).map(|o| o.focus.clone());
-        if dialog.is_none() && self.browser_shown {
+        if dialog.is_none() && self.browser_selected() && self.shows_tab() {
             if let Some(space) = self.model.active_space() {
                 let key = format!("{}:{}", space.machine.as_deref().unwrap_or(""), space.id);
                 if let Some(panel) = self.browsers.get(&key) {
@@ -1676,6 +1696,12 @@ impl AppWindow {
 
     fn load(&self, inst: Instance, window: &mut Window, cx: &mut Context<Self>) -> Copy {
         let mut copy = Copy { inst, id: 0, root: None, _watch: None, error: None };
+        // Enforce at the actual loader too: overlays call load directly rather
+        // than passing through visible/owned slot enumeration.
+        if copy.inst.name == crate::browser::NATIVE_SLOT {
+            copy.error = Some("reserved native Browser slot cannot load JavaScript".into());
+            return copy;
+        }
         let (Some(runtime), Some(folder)) = (&self.runtime, self.folders.get(&copy.inst.name)) else {
             copy.error = Some(format!("no mod folder ~/.config/herdr-app/mods/{}", copy.inst.name));
             return copy;
@@ -2967,15 +2993,20 @@ impl AppWindow {
             }
             "tab.close" => {
                 let Some(id) = Self::owned(a, "id").or(active_ctx) else { return self.fail("no tab to close") };
-                let Some(p) = self.model.space_of(&id) else { return self.fail(format!("no tab {id:?}")) };
-                // The last tab takes its space with it: ask like closing the space.
-                if p.tabs.len() == 1 {
-                    let mut args = json!({ "id": p.id });
-                    args["confirmed"] = a.get("confirmed").cloned().unwrap_or(Value::Null);
-                    return self.dispatch("space.close", &args, person, window, cx);
+                if crate::browser::close_outer(&mut self.model, &id) {
+                    // Hide only. Keep the stable workspace/profile identity even
+                    // when Browser was its last outer tab; never stop Chromium.
+                } else {
+                    let Some(p) = self.model.space_of(&id) else { return self.fail(format!("no tab {id:?}")) };
+                    // The last terminal tab takes its space with it, as before.
+                    if p.tabs.len() == 1 {
+                        let mut args = json!({ "id": p.id });
+                        args["confirmed"] = a.get("confirmed").cloned().unwrap_or(Value::Null);
+                        return self.dispatch("space.close", &args, person, window, cx);
+                    }
+                    let (addrs, _) = self.model.remove_tab(&id);
+                    self.kill(&addrs, cx);
                 }
-                let (addrs, _) = self.model.remove_tab(&id);
-                self.kill(&addrs, cx);
             }
             "tab.rename" => {
                 let Some(id) = Self::owned(a, "id").or(active_ctx) else { return self.fail("no tab to rename") };
@@ -4150,6 +4181,16 @@ impl AppWindow {
                 }
                 None => div().into_any_element(),
             },
+            Content::Mod { name, .. } if name == crate::browser::NATIVE_SLOT => {
+                let panel=self.model.space_of(&n.id).and_then(|s|self.browsers.get(&format!("{}:{}",s.machine.as_deref().unwrap_or(""),s.id))).cloned();
+                match panel {
+                    Some(panel)=>div().size_full().child(panel).into_any_element(),
+                    None=>div().size_full().flex().flex_col().items_center().justify_center().gap_3()
+                        .child("Browser is detached. Opening a workspace never starts Chromium automatically.")
+                        .child(div().id("attach-native-browser").px_3().py_2().bg(rgb(0x354358)).text_color(rgb(0xffffff)).cursor_pointer().child("Attach workspace browser")
+                            .on_click(cx.listener(|this,_,w,cx|this.open_browser(w,cx)))).into_any_element(),
+                }
+            }
             Content::Mod { .. } => self.render_slot(&n.id, cx),
             Content::Agent { .. } => match self.shown_agent() {
                 Some(addr) => match self.agent_view(&n.id, &addr) {
@@ -4936,8 +4977,8 @@ impl Render for AppWindow {
         let win_tracker = self.window_tracker(cx);
         let pane_drag = self.pane_drag_layer(cx);
         let browser_key = self.model.active_space().map(|s| format!("{}:{}", s.machine.as_deref().unwrap_or(""), s.id));
-        for (key, panel) in &self.browsers { panel.read(cx).visible(self.browser_shown && browser_key.as_ref() == Some(key)); }
-        let browser = browser_key.as_ref().and_then(|key| self.browsers.get(key)).filter(|_| self.browser_shown).cloned();
+        let browser_selected=self.browser_selected();
+        for (key, panel) in &self.browsers { panel.read(cx).visible(browser_selected && self.shows_tab() && browser_key.as_ref() == Some(key)); }
         div()
             .id("herdr")
             .track_focus(&self.focus)
@@ -5010,23 +5051,18 @@ impl Render for AppWindow {
                 }
             }))
             .child(tree)
-            .children(browser.map(|panel| div().absolute().top(px(36.)).bottom(px(28.)).left_0().right_0().child(panel)))
             .children(overlays)
             .children(tracker)
             .children(win_tracker)
             .child(pane_drag)
             .child(div().id("toggle-workspace-browser").absolute().bottom_0().right(px(12.)).px_3().py_1().bg(rgb(0x354358)).cursor_pointer()
-                .child(if self.browser_shown { "Hide Browser" } else { "Browser" })
-                .on_click(cx.listener(|this, _, _, cx| {
-                    if !this.browser_shown {
-                        if let Some(space) = this.model.active_space() {
-                            let workspace = space.id.clone(); let machine = space.machine.clone().unwrap_or_default();
-                            let key = format!("{machine}:{workspace}");
-                            this.browsers.entry(key).or_insert_with(|| cx.new(|cx| crate::browser::panel::Panel::new(workspace, machine, cx)));
-                        }
-                    }
-                    this.browser_shown = !this.browser_shown;
-                    cx.notify();
+                .child(if browser_selected { "Hide Browser" } else { "Browser" })
+                .on_click(cx.listener(|this, _, w, cx| {
+                    if this.browser_selected() {
+                        let other=this.model.active_space().and_then(|s|s.tabs.iter().find(|t|!crate::browser::is_outer(t) && t.settled.is_none())).map(|t|t.id.clone());
+                        if let Some(id)=other {this.model.select_tab(&id);} else if let Some(id)=this.model.active_tab().map(|t|t.id.clone()) {crate::browser::close_outer(&mut this.model,&id);}
+                        this.sync(w,cx);this.restore_focus(w,cx);
+                    } else {this.open_browser(w,cx);}
                 })))
             .child(crate::bench::frame_end())
     }
@@ -5894,6 +5930,39 @@ mod tests {
         cx.run_until_parked();
         cx.update(|window, cx| view.update(cx, |this, _| {
             assert!(this.pane_term("pa").unwrap().focus.is_focused(window));
+        }));
+    }
+
+    #[test]
+    fn reserved_browser_slot_never_loads_javascript() {
+        in_own_process("native_browser_slot_no_js");
+    }
+
+    #[gpui::test]
+    fn native_browser_slot_no_js(cx: &mut gpui::TestAppContext) {
+        use serde_json::json;
+        if !running_alone("native_browser_slot_no_js") { return; }
+        let name = crate::browser::NATIVE_SLOT;
+        let (view, cx) = open_window(cx, name,
+            "import { View, div } from 'gpui-kit'; export default class P extends View { render() { return div(); } }",
+            json!({"id":"reserved-browser", "type":"block", "content":{"mod":name}}));
+        cx.run_until_parked();
+        view.update(cx, |this, _| {
+            assert!(!this.visible().1.iter().any(|(_, inst)| inst.name == name));
+            assert!(!this.owned_mods().values().any(|inst| inst.name == name));
+            assert!(!this.copies.values().any(|copy| copy.inst.name == name));
+        });
+        // A real installed folder with the reserved name exists above. Direct
+        // dialog/window entry must still be rejected by the central loader.
+        cx.update(|window, cx| view.update(cx, |this, cx| {
+            for kind in ["dialog", "window"] {
+                let id = format!("reserved-{kind}");
+                this.open_overlay(id.clone(), json!({"mod":name,"kind":kind}), window, cx);
+                let copy = &this.copies[&format!("overlay:{id}")];
+                assert!(copy.root.is_none());
+                assert_eq!(copy.id, 0, "must reject before prepare_load or runtime.try_load");
+                assert!(copy.error.as_ref().unwrap().contains("reserved native"));
+            }
         }));
     }
 

@@ -14,8 +14,20 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[derive(Default, Clone, Copy, PartialEq, Eq, Debug)]
+enum Phase {
+    #[default]
+    Starting,
+    Running,
+    Blocked,
+    Revoked,
+    Stopped,
+    Failed,
+}
+
 #[derive(Default)]
 struct Snapshot {
+    phase: Phase,
     generation: String,
     selected: String,
     tabs: Vec<Value>,
@@ -24,6 +36,9 @@ struct Snapshot {
     error: String,
     ready: bool,
     tools_open: bool,
+    tools_wanted: bool,
+    tools_target: String,
+    tools_requested_target: String,
     tools_epoch: u64,
     revision: u64,
     metadata_revision: u64,
@@ -43,13 +58,54 @@ impl Snapshot {
             self.tools_open = false;
         }
         self.selected = selected;
+        // A queued follow may be cancelled by a rapid return to the retained
+        // frontend. Resume that exact surface and its ACK, not a new epoch.
+        self.tools_open = self.tools_wanted
+            && !self.tools_target.is_empty()
+            && self.selected == self.tools_target;
         self.tabs = tabs["tabs"].as_array().cloned().unwrap_or_default();
         self.revision += 1;
+    }
+
+    fn queue_failed(&mut self, error: &str) {
+        if self.ready {
+            self.error = format!("Browser input queue full/disconnected: {error}");
+            self.revision += 1;
+        }
+    }
+
+    fn accept_follow(&mut self, target: &str) -> bool {
+        let current = self.tools_wanted && self.selected == target;
+        if !current && self.tools_requested_target == target {
+            self.tools_requested_target.clear();
+        }
+        current
+    }
+
+    fn needs_follow(&self, target: &str) -> bool {
+        self.tools_wanted && self.tools_target != target && self.tools_requested_target != target
+    }
+
+    fn tools_opened(&mut self, target: String, follow: bool) {
+        // The core's open is idempotent for a retained frontend. Only a real
+        // replacement (the previous frontend was closed) starts ACK0 again.
+        if self.tools_target != target {
+            self.tools_epoch += 1;
+            self.devtools = None;
+        }
+        if !follow {
+            self.tools_wanted = true;
+        }
+        self.tools_target = target;
+        self.tools_open = self.tools_wanted && self.selected == self.tools_target;
+        self.tools_requested_target.clear();
     }
 }
 struct Command {
     method: &'static str,
     params: Value,
+    /// Internal scheduling flag, never a new wire method.
+    follow: bool,
 }
 
 pub struct Panel {
@@ -68,11 +124,24 @@ pub struct Panel {
     last_target: String,
     last_tools_epoch: u64,
     pressed: std::cell::RefCell<std::collections::HashMap<String, String>>,
+    finished: Option<mpsc::Receiver<()>>,
+    confirm_takeover: bool,
+    confirm_stop: bool,
     _refresh: Task<()>,
 }
 
 impl Panel {
     pub fn new(workspace: String, machine: String, cx: &mut Context<Self>) -> Self {
+        Self::start(workspace, machine, false, None, cx)
+    }
+    fn start(
+        workspace: String,
+        machine: String,
+        force: bool,
+        previous: Option<mpsc::Receiver<()>>,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let (finished_tx, finished) = mpsc::channel();
         let shared = Arc::new(Mutex::new(Snapshot::default()));
         let visible = Arc::new(AtomicBool::new(true));
         let (commands, rx) = mpsc::sync_channel::<Command>(128);
@@ -80,8 +149,17 @@ impl Panel {
         let shown = visible.clone();
         let ws = workspace.clone();
         let host = machine.clone();
+        let worker_commands = commands.clone();
         std::thread::spawn(move || {
             let result = (|| -> Result<()> {
+                if let Some(previous) = previous {
+                    if matches!(
+                        previous.recv_timeout(Duration::from_secs(30)),
+                        Err(mpsc::RecvTimeoutError::Timeout)
+                    ) {
+                        bail!("Previous viewer has not disconnected; retry explicitly");
+                    }
+                }
                 if !host.is_empty() {
                     bail!(
                         "Remote browser needs a dedicated authenticated viewer connection to {host}; local fallback is forbidden"
@@ -98,7 +176,10 @@ impl Panel {
                     json!({"workspace":ws}),
                     Duration::from_secs(60),
                 )?;
-                let acquired = core.call("browser.acquire", json!({"workspace":ws}))?;
+                let acquired = core.call(
+                    "browser.acquire",
+                    json!({"workspace":ws,"force":force,"confirmed":force}),
+                )?;
                 let generation = acquired["generation"]
                     .as_str()
                     .ok_or_else(|| anyhow::anyhow!("Missing controller generation"))?
@@ -109,6 +190,7 @@ impl Panel {
                     let mut s = state.lock().unwrap();
                     s.generation = generation.clone();
                     s.ready = true;
+                    s.phase = Phase::Running;
                     s.tabs(tabs);
                 }
                 let frame_core = core.clone();
@@ -116,6 +198,7 @@ impl Panel {
                 let frame_lease = lease.clone();
                 let frame_host = host.clone();
                 let frame_ws = ws.clone();
+                let follow_commands = worker_commands;
                 // Exactly one capture/decode in flight per surface. Control RPCs run
                 // on the other thread and do not wait for image decompression.
                 let frames = std::thread::spawn(move || {
@@ -154,6 +237,7 @@ impl Panel {
                                     let mut s = frame_state.lock().unwrap();
                                     s.error = format!("Controller disconnected/revoked: {e:#}");
                                     s.ready = false;
+                                    s.phase = Phase::Revoked;
                                     s.page = None;
                                     s.devtools = None;
                                     s.revision += 1;
@@ -192,6 +276,24 @@ impl Panel {
                         if target.is_empty() {
                             std::thread::park_timeout(Duration::from_millis(100));
                             continue;
+                        }
+                        {
+                            let mut s = frame_state.lock().unwrap();
+                            if s.needs_follow(&target) {
+                                s.tools_requested_target = target.clone();
+                                if follow_commands
+                                    .try_send(Command {
+                                        method: "browser.devtools.open",
+                                        params: json!({"target":target}),
+                                        follow: true,
+                                    })
+                                    .is_err()
+                                {
+                                    s.tools_requested_target.clear();
+                                    s.error = "DevTools follow queue full".into();
+                                    s.revision += 1;
+                                }
+                            }
                         }
                         for index in 0..if tools { 2 } else { 1 } {
                             let ack_key = (
@@ -265,6 +367,15 @@ impl Panel {
                                     s.revision += 1;
                                 }
                                 Err(e) => {
+                                    if matches!(
+                                        crate::hc::error_kind(&e),
+                                        Some("not_owner" | "stale_generation")
+                                    ) {
+                                        s.phase = Phase::Revoked;
+                                        s.ready = false;
+                                        s.page = None;
+                                        s.devtools = None;
+                                    }
                                     s.error = format!("Frame: {e:#}");
                                     s.revision += 1;
                                 }
@@ -274,14 +385,65 @@ impl Panel {
                     }
                 });
                 for cmd in rx {
+                    // Explicit reconnect/stop cancels queued work, not merely UI
+                    // commits. Never execute old target input after replacement.
+                    if !state.lock().unwrap().ready {
+                        break;
+                    }
+                    if cmd.follow {
+                        let mut s = state.lock().unwrap();
+                        if !s.accept_follow(cmd.params["target"].as_str().unwrap_or_default()) {
+                            continue;
+                        }
+                    }
                     let mut params = lease.clone();
                     if let Some(values) = cmd.params.as_object() {
                         for (k, v) in values {
                             params[k] = v.clone();
                         }
                     }
+                    if cmd.method == "browser.devtools.open" {
+                        let previous = state.lock().unwrap().tools_target.clone();
+                        if !previous.is_empty() && params["target"] != previous {
+                            let mut close = lease.clone();
+                            close["target"] = previous.into();
+                            if let Err(e) = core.call("browser.devtools.close", close) {
+                                if crate::hc::error_kind(&e) != Some("not_found") {
+                                    let mut s = state.lock().unwrap();
+                                    s.error = format!("DevTools close failed: {e:#}");
+                                    s.revision += 1;
+                                    continue;
+                                }
+                            }
+                        }
+                    }
+                    if cmd.method == "browser.devtools.close" {
+                        let previous = state.lock().unwrap().tools_target.clone();
+                        if !previous.is_empty() {
+                            params["target"] = previous.into();
+                        }
+                    }
+                    let requested_target = params["target"].as_str().unwrap_or_default().to_owned();
                     match core.call(cmd.method, params) {
-                        Ok(_) => {
+                        Ok(reply) => {
+                            if cmd.method == "browser.stop" && reply["state"] != "stopped" {
+                                let mut s = state.lock().unwrap();
+                                s.error = "Browser exit was not observed; session remains attached"
+                                    .into();
+                                s.revision += 1;
+                                continue;
+                            }
+                            if cmd.method == "browser.stop" {
+                                let mut s = state.lock().unwrap();
+                                s.phase = Phase::Stopped;
+                                s.ready = false;
+                                s.page = None;
+                                s.devtools = None;
+                                s.tools_open = false;
+                                s.error="Stopped. Profile retained; live drafts and JavaScript memory were lost.".into();
+                                s.revision += 1;
+                                break;
+                            }
                             {
                                 let mut s = state.lock().unwrap();
                                 if s.error.starts_with(cmd.method) {
@@ -291,14 +453,14 @@ impl Panel {
                             }
                             if cmd.method == "browser.devtools.open" {
                                 let mut s = state.lock().unwrap();
-                                if !s.tools_open {
-                                    s.tools_epoch += 1;
-                                }
-                                s.tools_open = true;
+                                s.tools_opened(requested_target, cmd.follow);
                             }
                             if cmd.method == "browser.devtools.close" {
                                 let mut s = state.lock().unwrap();
                                 s.tools_open = false;
+                                s.tools_wanted = false;
+                                s.tools_target.clear();
+                                s.tools_requested_target.clear();
                                 s.devtools = None;
                             }
                             if cmd.method != "browser.input" && cmd.method != "browser.viewport" {
@@ -314,6 +476,7 @@ impl Panel {
                                 crate::hc::error_kind(&e),
                                 Some("not_owner" | "stale_generation")
                             ) {
+                                s.phase = Phase::Revoked;
                                 s.ready = false;
                                 s.page = None;
                                 s.devtools = None;
@@ -326,15 +489,21 @@ impl Panel {
                 {
                     state.lock().unwrap().ready = false;
                 }
-                let _ = frames.join();
                 let _ = core.call("browser.release", lease);
+                let _ = frames.join();
                 Ok(())
             })();
             if let Err(e) = result {
                 let mut s = state.lock().unwrap();
+                s.phase = if crate::hc::error_kind(&e) == Some("owned") {
+                    Phase::Blocked
+                } else {
+                    Phase::Failed
+                };
                 s.error = format!("{e:#}");
                 s.revision += 1;
             }
+            let _ = finished_tx.send(());
         });
         let refresh = cx.spawn(async move |this, cx| {
             loop {
@@ -371,8 +540,25 @@ impl Panel {
             last_target: String::new(),
             last_tools_epoch: 0,
             pressed: Default::default(),
+            finished: Some(finished),
+            confirm_takeover: false,
+            confirm_stop: false,
             _refresh: refresh,
         }
+    }
+    fn reconnect(&mut self, force: bool, window: &mut Window, cx: &mut Context<Self>) {
+        self.shared.lock().unwrap().ready = false;
+        let previous = self.finished.take();
+        let replacement = Self::start(
+            self.workspace.clone(),
+            self.machine.clone(),
+            force,
+            previous,
+            cx,
+        );
+        *self = replacement;
+        self.focus.focus(window, cx);
+        cx.notify();
     }
     pub fn focus_handle(&self) -> &FocusHandle {
         &self.focus
@@ -389,10 +575,18 @@ impl Panel {
         }
     }
     fn command(&self, method: &'static str, params: Value) {
-        if let Err(e) = self.commands.try_send(Command { method, params }) {
+        // Layout/held-key callbacks can arrive after stop or ownership loss.
+        // They must neither enqueue work nor overwrite the terminal diagnosis.
+        if !self.shared.lock().unwrap().ready {
+            return;
+        }
+        if let Err(e) = self.commands.try_send(Command {
+            method,
+            params,
+            follow: false,
+        }) {
             let mut s = self.shared.lock().unwrap();
-            s.error = format!("Browser input queue full/disconnected: {e}");
-            s.revision += 1;
+            s.queue_failed(&e.to_string());
         }
     }
     fn target(&self) -> String {
@@ -618,15 +812,31 @@ impl Drop for Panel {
 }
 impl Render for Panel {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let (tabs, error, tools, tools_epoch) = {
+        let (tabs, error, tools, tools_epoch, phase, ready) = {
             let s = self.shared.lock().unwrap();
-            (s.tabs.clone(), s.error.clone(), s.tools_open, s.tools_epoch)
+            (
+                s.tabs.clone(),
+                s.error.clone(),
+                s.tools_open,
+                s.tools_epoch,
+                s.phase,
+                s.ready,
+            )
         };
         if self.last_tools_epoch != tools_epoch {
             self.last_tools_epoch = tools_epoch;
             self.tools_bounds.set(Bounds::default());
         }
         let target = self.target();
+        if !self.editing_address {
+            if let Some(url) = tabs
+                .iter()
+                .find(|t| t["id"] == target)
+                .and_then(|t| t["url"].as_str())
+            {
+                self.address = url.into();
+            }
+        }
         let input_pending = self.shared.lock().unwrap().input_pending;
         if self.last_target != target {
             self.last_target = target.clone();
@@ -725,7 +935,8 @@ impl Render for Panel {
                     .children(tabs.iter().map(|tab| {
                         let id = tab["id"].as_str().unwrap_or_default().to_owned();
                         let selected = id == target;
-                        div()
+                        let close_id=id.clone();
+                        div().flex().gap_2()
                             .id(SharedString::from(format!("browser-tab-{id}")))
                             .px_2()
                             .bg(rgb(if selected { 0x475166 } else { 0x20242b }))
@@ -737,13 +948,25 @@ impl Render for Panel {
                                     .to_owned(),
                             )
                             .on_click(cx.listener(move |this, _, _, _| {
+                                this.editing_address=false;
                                 this.command("browser.tab.select", json!({"target":id}))
                             }))
+                            .child(div().id(SharedString::from(format!("browser-close-{close_id}"))).cursor_pointer().child("×").on_click(cx.listener(move |this,_,_,cx| {this.command("browser.tab.close",json!({"target":close_id}));cx.stop_propagation();})))
                     }))
                     .child(div().id("browser-new-tab").child("+").on_click(
                         cx.listener(|this, _, _, _| this.command("browser.tab.create", json!({}))),
                     )),
             )
+            .child(div().flex().gap_3().p_1().text_xs().child(match phase {Phase::Starting=>"Connecting to workspace core…",Phase::Running=>"Attached · exclusive controller",Phase::Blocked=>"In use on another desktop",Phase::Revoked=>"Control revoked/disconnected · no automatic reclaim",Phase::Stopped=>"Stopped · profile retained",Phase::Failed=>"Browser unavailable"})
+                .when(!ready && phase!=Phase::Starting,|d|d.child(div().id("browser-reconnect").cursor_pointer().child("Reconnect / start").on_click(cx.listener(|this,_,w,cx|this.reconnect(false,w,cx)))))
+                .when(matches!(phase,Phase::Blocked|Phase::Revoked),|d|d.child(div().id("browser-takeover").cursor_pointer().child("Force takeover…").on_click(cx.listener(|this,_,_,cx|{this.confirm_takeover=true;cx.notify();}))))
+                .when(ready,|d|d.child(div().id("browser-stop").cursor_pointer().child("Stop workspace browser…").on_click(cx.listener(|this,_,_,cx|{this.confirm_stop=true;cx.notify();})))))
+            .when(self.confirm_takeover,|d|d.child(div().flex().gap_3().p_2().bg(rgb(0x59442c)).child("Disconnect the other desktop and revoke its input/DevTools?")
+                .child(div().id("browser-confirm-takeover").cursor_pointer().child("Confirm takeover").on_click(cx.listener(|this,_,w,cx|this.reconnect(true,w,cx))))
+                .child(div().id("browser-cancel-takeover").cursor_pointer().child("Cancel").on_click(cx.listener(|this,_,_,cx|{this.confirm_takeover=false;cx.notify();})))))
+            .when(self.confirm_stop,|d|d.child(div().flex().gap_3().p_2().bg(rgb(0x59442c)).child("Stop Chromium? Unsaved drafts and JS memory will be lost. Profile retained; URL restart recovery is not implemented.")
+                .child(div().id("browser-confirm-stop").cursor_pointer().child("Confirm stop").on_click(cx.listener(|this,_,_,cx|{this.confirm_stop=false;this.command("browser.stop",json!({"confirmed":true}));cx.notify();})))
+                .child(div().id("browser-cancel-stop").cursor_pointer().child("Cancel").on_click(cx.listener(|this,_,_,cx|{this.confirm_stop=false;cx.notify();})))))
             .when(!error.is_empty(), |d| {
                 d.child(div().p_2().text_color(rgb(0xffb0a0)).child(error))
             })
@@ -763,5 +986,81 @@ impl Render for Panel {
             .child(div().text_xs().child(
                 format!("Ctrl+Escape: focus address without sending Escape · hide keeps Chromium alive · input ACKs pending: {input_pending}"),
             ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Phase, Snapshot};
+    use serde_json::json;
+
+    fn select(s: &mut Snapshot, target: &str) {
+        s.tabs(json!({"revision":s.metadata_revision + 1,"selected":target,"tabs":[{"id":"A"},{"id":"B"}]}));
+    }
+
+    #[test]
+    fn late_layout_send_failure_preserves_stopped_or_failed_diagnosis() {
+        for phase in [Phase::Stopped, Phase::Failed, Phase::Revoked] {
+            let mut s = Snapshot {
+                phase,
+                error: "terminal diagnosis".into(),
+                ..Snapshot::default()
+            };
+            s.queue_failed("closed channel");
+            assert_eq!(s.error, "terminal diagnosis");
+            assert_eq!(s.revision, 0);
+            assert_eq!(s.phase, phase);
+        }
+        let mut s = Snapshot {
+            ready: true,
+            ..Snapshot::default()
+        };
+        s.queue_failed("full channel");
+        assert!(s.error.contains("full channel"));
+        assert_eq!(s.revision, 1);
+    }
+
+    #[test]
+    fn rapid_return_retains_frontend_epoch_and_cancels_only_its_follow_latch() {
+        let mut s = Snapshot::default();
+        select(&mut s, "A");
+        s.tools_opened("A".into(), false);
+        let epoch = s.tools_epoch;
+        select(&mut s, "B");
+        assert!(!s.tools_open);
+        assert!(s.needs_follow("B"));
+        s.tools_requested_target = "B".into(); // queued, not executed
+        select(&mut s, "A");
+        assert!(s.tools_open, "return resumes the retained frontend");
+        assert!(!s.accept_follow("B")); // control worker cancels stale follow
+        assert!(s.tools_requested_target.is_empty());
+        assert_eq!(
+            s.tools_epoch, epoch,
+            "retain original consumption ACK epoch"
+        );
+        s.tools_opened("A".into(), false); // idempotent manual open, too
+        assert_eq!(s.tools_epoch, epoch);
+        select(&mut s, "B");
+        assert!(
+            s.needs_follow("B"),
+            "cancelled latch must not suppress next B"
+        );
+        s.tools_requested_target = "B".into();
+        assert!(s.accept_follow("B"));
+        s.tools_opened("B".into(), true);
+        assert!(s.tools_open);
+        assert_eq!(
+            s.tools_epoch,
+            epoch + 1,
+            "actually replaced frontend starts fresh ACK"
+        );
+        select(&mut s, "A");
+        assert!(s.accept_follow("A"));
+        s.tools_opened("A".into(), true);
+        assert!(s.tools_open);
+        assert_eq!(s.tools_epoch, epoch + 2);
+        s.tools_requested_target = "A".into();
+        assert!(!s.accept_follow("B"));
+        assert_eq!(s.tools_requested_target, "A", "never clear a newer request");
     }
 }

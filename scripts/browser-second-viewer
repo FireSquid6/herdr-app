@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+# A second native viewer, separate private Xvfb/display/auth/home, same OWNED core.
+# Keep `up` in an hc terminal; cleanup uses browser-integration down <root>.
+set -euo pipefail
+here=$(cd "$(dirname "$0")/.." && pwd)
+source "$HOME/.local/share/herdr-fork-tools/env.sh"
+run=${1:?owned /var/tmp/ha.XXXXXX root required}
+action=${2:-up}
+[[ $run == /var/tmp/ha.* && -d $run && ! -L $run && -f $run/s/.sandbox-owner && ! -L $run/s/.sandbox-owner ]] || exit 2
+[[ $(<"$run/s/.sandbox-owner") == "$(id -u):browser-mvp" ]] || exit 2
+source "$run/env"
+unset HC_SCOPE HC_TERMINAL_SOCKET HC_TERMINAL_ID
+export HC_SESSION=herdr-app-browser-mvp HERDR_APP_HOME=$run/viewer2/home
+export XDG_STATE_HOME=$run/s/state XDG_CONFIG_HOME=$run/s/config XDG_CACHE_HOME=$run/s/cache XDG_DATA_HOME=$run/s/data
+export XDG_RUNTIME_DIR=$run/s/runtime TMPDIR=$run/s/tmp
+export HC_SOCKET=$XDG_RUNTIME_DIR/herdr-core/$HC_SESSION.sock
+[[ -S $HC_SOCKET && ! -L $HC_SOCKET ]] || exit 2
+export WAYLAND_DISPLAY= HERDR_APP_NO_SOUND=1 XAUTHORITY=$run/viewer2/auth
+export PATH=$run/s/bin:$PATH
+umask 077
+mkdir -p "$HERDR_APP_HOME"
+if [[ $action == up ]]; then
+  if [[ -f $run/viewer2/pid && -d /proc/$(<"$run/viewer2/pid") ]]; then echo 'viewer already running' >&2; exit 2; fi
+  cookie=$(python3 -c 'import secrets; print(secrets.token_hex(16))')
+  touch "$XAUTHORITY"
+  xauth -q -f "$XAUTHORITY" add :0 MIT-MAGIC-COOKIE-1 "$cookie"
+  : > "$run/viewer2/display"
+  Xvfb -displayfd 3 -screen 0 1400x900x24 -nolisten tcp -auth "$XAUTHORITY" 3>"$run/viewer2/display" >"$run/viewer2/xvfb.log" 2>&1 &
+  printf '%s\n' "$!" > "$run/viewer2/xpid"
+  for ((i=0; i<100; i++)); do [[ -s $run/viewer2/display ]] && break; sleep .05; done
+  n=$(<"$run/viewer2/display"); [[ $n =~ ^[0-9]+$ ]] || exit 2
+  export DISPLAY=:$n
+  xauth -q -f "$XAUTHORITY" add "$DISPLAY" MIT-MAGIC-COOKIE-1 "$cookie"
+  unset cookie
+  hc server status > "$run/viewer2/core-status.json"
+  "$here/target/debug/herdr-app" > "$run/viewer2/app.log" 2>&1 &
+  printf '%s\n' "$!" > "$run/viewer2/pid"
+  printf 'Second private viewer: %s display=%s core_socket=%s\n' "$run/viewer2" "$DISPLAY" "$HC_SOCKET"
+  wait "$!"
+else
+  # Refuse stale/reused displays: the recorded X server must still be ours.
+  python3 - "$run" <<'PY'
+import os,sys
+from pathlib import Path
+r=Path(sys.argv[1]); p=int((r/'viewer2/xpid').read_text())
+assert f'HERDR_APP_HOME={r}/viewer2/home'.encode() in Path(f'/proc/{p}/environ').read_bytes().split(b'\0')
+assert str(r/'viewer2/auth').encode() in Path(f'/proc/{p}/cmdline').read_bytes().split(b'\0')
+PY
+  n=$(<"$run/viewer2/display"); [[ $n =~ ^[0-9]+$ ]] || exit 2
+  export DISPLAY=:$n
+  shift 2
+  case "$action" in
+    shot) import -display "$DISPLAY" -window Herdr "${1:?PNG path required}" ;;
+    status) exec "$here/target/debug/herdr-app" status ;;
+    click|type|key|move|drag|hold|release) exec uv run -q --with python-xlib python "$here/scripts/sandbox-input.py" "$action" "$@" ;;
+    *) echo 'expected up, shot, status, or native sandbox input' >&2; exit 2 ;;
+  esac
+fi

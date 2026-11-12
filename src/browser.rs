@@ -7,6 +7,42 @@ use anyhow::{Result, bail};
 use base64::Engine as _;
 use std::sync::Arc;
 
+// Stored using the existing mod-block envelope so older app versions can still
+// read every terminal/layout; they show a missing-mod placeholder for this slot.
+// This is native-only: no JS mod is installed and references never start Chrome.
+pub const NATIVE_SLOT: &str = "herdr-native-browser";
+
+pub fn is_outer(tab: &crate::model::Tab) -> bool {
+    tab.root.walk().into_iter().any(
+        |n| matches!(n.content(), Some(crate::layout::Content::Mod{name,..}) if name==NATIVE_SLOT),
+    )
+}
+
+/// Closing a pure Browser outer tab detaches it without deleting its workspace
+/// identity, even when it was the last tab. Chromium lifetime stays core-owned.
+pub fn close_outer(model: &mut crate::model::Model, id: &str) -> bool {
+    let Some(tab) = model.tab(id) else {
+        return false;
+    };
+    if !is_outer(tab) || !tab.root.terminals().is_empty() {
+        return false;
+    }
+    let Some(space) = model.space_of(id).map(|s| s.id.clone()) else {
+        return false;
+    };
+    let space = model.space_mut(&space).unwrap();
+    space.tabs.retain(|t| t.id != id);
+    if space.active.as_deref() == Some(id) {
+        space.active = space
+            .tabs
+            .iter()
+            .find(|t| t.settled.is_none())
+            .or_else(|| space.tabs.first())
+            .map(|t| t.id.clone());
+    }
+    true
+}
+
 pub const MAX_MESSAGE: usize = 4 * 1024 * 1024;
 const MAX_PIXELS: u64 = 16_777_216;
 
@@ -118,6 +154,38 @@ impl SurfaceState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn closing_last_browser_outer_keeps_workspace_and_old_layout_envelope() {
+        use crate::{
+            layout::{Content, Node},
+            model::{Model, Tab},
+        };
+        let mut model = Model::default();
+        let node = Node::block(
+            "browser-pane",
+            Content::Mod {
+                name: NATIVE_SLOT.into(),
+                props: serde_json::Value::Null,
+            },
+        );
+        let serialized = serde_json::to_value(&node).unwrap();
+        assert_eq!(serialized["content"]["mod"], NATIVE_SLOT);
+        let restored: Node = serde_json::from_value(serialized).unwrap();
+        model.add_space(
+            "ws",
+            "Workspace",
+            "/fixture",
+            Tab::with_pane("browser-tab", "Browser", restored),
+        );
+        assert!(is_outer(model.active_tab().unwrap()));
+        assert!(close_outer(&mut model, "browser-tab"));
+        assert_eq!(model.active_space().unwrap().id, "ws");
+        assert!(model.active_tab().is_none());
+        model.add_tab("ws", Tab::new("terminal-tab", "Shell", "pane", "t1"));
+        assert!(!close_outer(&mut model, "terminal-tab"));
+        assert_eq!(model.active_tab().unwrap().id, "terminal-tab");
+    }
+
     fn identity() -> Identity {
         Identity {
             machine: "host-a".into(),

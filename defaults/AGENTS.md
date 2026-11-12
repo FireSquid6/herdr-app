@@ -38,8 +38,8 @@ draws text; read or change other mods' code at run time.
 
 ## Experimental native workspace browser (personal fork)
 
-The native **Browser** button opens a human-operated streamed Chromium panel for
-an explicitly selected local workspace. It starts lazily, only after the person
+The native **Browser** button opens a human-operated streamed Chromium outer tab
+alongside terminal tabs for an explicitly selected local workspace. It starts lazily, only after the person
 opens it. The workspace's core must opt in with `HC_BROWSER_CHROME` pointing to a
 sandbox-capable full Chromium and implement browser wire revision 2; otherwise the
 panel reports an unsupported error. Remote workspaces currently report that a
@@ -47,10 +47,18 @@ dedicated viewer connection is required, with no local fallback.
 
 The address field navigates explicitly; Reload, back/forward and inner tabs are
 native controls. DevTools is explicitly opened and docked below the page when
-supported by core. Hiding the panel does not stop Chromium. **Ctrl+Escape** focuses
+supported by core. Hiding/closing the outer tab does not stop Chromium; an inner
+tab's × closes only that webpage. Explicit reconnect and confirmed takeover do not
+happen automatically. Confirmed **Stop workspace browser** loses live drafts and
+JS memory but retains the profile; URL restart recovery is not implemented.
+Older apps can still read the existing mod-block storage envelope and all terminal
+layouts, but show a missing-mod placeholder for the native Browser slot. A stored
+slot alone does not start/acquire Chromium: the person must explicitly attach.
+**Ctrl+Escape** focuses
 the address field without sending Escape into the page/debugger. Configured Herdr
 bindings retain precedence. Physical key codes, IME and HiDPI are not yet verified.
-This is an experimental Stage A surface, not the complete browsing product.
+This is an experimental native MVP surface, not the complete browsing product;
+remote routing, files/clipboard, native dialogs and full recovery remain incomplete.
 
 Pages and mods receive no browser/CDP bridge. There are no agent-facing browser
 inspection, JavaScript, navigation or input commands. Do not use app automation

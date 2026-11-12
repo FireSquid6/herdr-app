@@ -60,6 +60,37 @@ The window arranges terminals. The core runs them.
 Closing the window leaves them running; closing a pane or tab ends its terminals.
 After a reboot or core crash, kept panes get fresh shells in their last folders, not their old programs.
 
+## Workspace browser — experimental Linux personal fork
+
+This fork adds a human-operated **Browser** outer tab alongside terminal tabs,
+with real Chromium webpage tabs and explicitly opened, bottom-docked real
+DevTools. Use the native Browser button to attach lazily. The workspace core must
+be this fork's browser-capable build, opt in with
+`HC_BROWSER_CHROME=/opt/google/chrome/chrome`, and have Python3 and sandbox-capable
+full Chromium installed. This is not enabled by the upstream installer above.
+
+Pages execute on the workspace's core host with a separate persistent profile.
+Hiding/closing the Browser outer tab or quitting the window preserves live pages;
+closing an inner tab closes that webpage. Explicit reconnect and confirmed force
+takeover are distinct from **Stop workspace browser**, which warns about lost
+unsent drafts/JavaScript memory and retains the profile. URL restoration after
+stop/core crash is not implemented. Ctrl+Escape focuses the address field without
+sending Escape into a debugger. Configured Herdr shortcuts retain precedence.
+
+This is an incomplete experimental MVP, not full browser integration. Remote
+viewer routing is not yet implemented and reports an error rather than running
+locally. Clipboard, uploads/downloads, IME/physical keyboard layout, HiDPI, native
+menus/dialog UI and independent recovery across core restart remain incomplete or
+unverified. Pages and mods receive no privileged browser bridge; there is no
+agent-facing inspection/JavaScript/browser-control API. Chromium sandboxing is
+never disabled. Keep Chrome updated through its supported system package.
+
+For isolated native verification (no production installs or real desktop input),
+use `scripts/browser-integration preflight` and run
+`scripts/browser-integration up` in a long-lived test terminal. The runner prints
+its private scratch/evidence paths and cleanup command. See the shared native
+evidence for the tested revision and explicit PASS/FAIL/NOT TESTED scope.
+
 ## Work on another machine
 
 Add an SSH machine from Settings → Machines or the sidebar's Add machine action.
