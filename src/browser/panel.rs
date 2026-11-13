@@ -654,11 +654,14 @@ impl Panel {
         if self.editing_address {
             match k.key.as_str() {
                 "enter" => {
-                    self.command(
-                        "browser.navigate",
-                        json!({"target":self.target(),"url":self.address}),
-                    );
-                    self.editing_address = false;
+                    if let Some(url) = address_url(&self.address) {
+                        self.address = url.clone();
+                        self.command(
+                            "browser.navigate",
+                            json!({"target":self.target(),"url":url}),
+                        );
+                        self.editing_address = false;
+                    }
                 }
                 "backspace" => {
                     self.address.pop();

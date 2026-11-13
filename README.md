@@ -69,6 +69,14 @@ be this fork's browser-capable build, opt in with
 `HC_BROWSER_CHROME=/opt/google/chrome/chrome`, and have Python3 and sandbox-capable
 full Chromium installed. This is not enabled by the upstream installer above.
 
+The address bar accepts sites and searches: `google.com` becomes
+`https://google.com/`, and ordinary text becomes a properly encoded Google search.
+Explicit HTTP(S) URLs keep their scheme (including HTTP for local development),
+and `about:blank` still works. Empty input is a no-op. Unsupported explicit
+schemes, such as file/data/JavaScript URLs, remain rejected by core rather than
+being executed or silently sent to Google. Bare localhost/IP addresses also gain
+HTTPS; enter an explicit `http://` URL if your development server needs HTTP.
+
 Pages execute on the workspace's core host with a separate persistent profile.
 Hiding/closing the Browser outer tab or quitting the window preserves live pages;
 closing an inner tab closes that webpage. Explicit reconnect and confirmed force

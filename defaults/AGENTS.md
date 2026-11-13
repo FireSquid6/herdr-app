@@ -45,8 +45,11 @@ sandbox-capable full Chromium and implement browser wire revision 2; otherwise t
 panel reports an unsupported error. Remote workspaces currently report that a
 dedicated viewer connection is required, with no local fallback.
 
-The address field navigates explicitly; Reload, back/forward and inner tabs are
-native controls. DevTools is explicitly opened and docked below the page when
+The address field navigates on Enter: bare sites such as `google.com` gain
+`https://`, and other text becomes an encoded Google search. Explicit HTTP(S)
+URLs and `about:blank` remain navigation; empty input does nothing. Unsupported
+explicit schemes still fail core validation rather than being sent to search.
+Reload, back/forward and inner tabs are native controls. DevTools is explicitly opened and docked below the page when
 supported by core. Hiding/closing the outer tab does not stop Chromium; an inner
 tab's × closes only that webpage. Explicit reconnect and confirmed takeover do not
 happen automatically. Confirmed **Stop workspace browser** loses live drafts and

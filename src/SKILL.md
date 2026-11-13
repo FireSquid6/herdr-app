@@ -36,8 +36,10 @@ its live pages on that workspace's core; confirmed **Stop workspace browser** is
 separate and loses live drafts/JS memory while retaining its isolated profile.
 An explicit **Reconnect / start** or confirmed takeover is required after losing
 control; displaced viewers do not reclaim automatically. **Ctrl+Escape** focuses
-the native address field without sending Escape into a page/debugger. Remote
-viewer routing, clipboard/files, IME/HiDPI and full recovery are still incomplete;
+the native address field without sending Escape into a page/debugger. Entering
+a bare site adds HTTPS; other text becomes a Google search. Explicit HTTP(S) URLs
+and `about:blank` remain navigation; unsupported explicit schemes remain rejected.
+Remote viewer routing, clipboard/files, IME/HiDPI and full recovery are still incomplete;
 unsupported peers fail visibly without falling back to a different machine.
 
 ## Show something when asked

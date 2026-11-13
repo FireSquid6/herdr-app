@@ -2,7 +2,9 @@
 //!
 //! Every asynchronous result retains the complete controller identity. This module
 //! deliberately does not decide which core owns a workspace; the window supplies it.
+mod address;
 pub mod panel;
+use address::address_url;
 use anyhow::{Result, bail};
 use base64::Engine as _;
 use std::sync::{Arc, Weak};
