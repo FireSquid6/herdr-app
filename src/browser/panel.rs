@@ -45,6 +45,15 @@ struct Snapshot {
     input_pending: u64,
 }
 impl Snapshot {
+    fn acquired(&mut self, generation: String, tabs: Value) {
+        self.generation = generation;
+        self.ready = true;
+        self.phase = Phase::Running;
+        // Readiness is observable even when the workspace has no targets.
+        self.revision += 1;
+        self.tabs(tabs);
+    }
+
     fn tabs(&mut self, tabs: Value) {
         let revision = tabs["revision"].as_u64().unwrap_or(0);
         if revision < self.metadata_revision {
@@ -52,6 +61,13 @@ impl Snapshot {
         }
         self.metadata_revision = revision;
         let selected = tabs["selected"].as_str().unwrap_or_default().to_owned();
+        let next_tabs = tabs["tabs"].as_array().cloned().unwrap_or_default();
+        let tools_open = self.tools_wanted
+            && !self.tools_target.is_empty()
+            && selected == self.tools_target;
+        if selected == self.selected && next_tabs == self.tabs && tools_open == self.tools_open {
+            return;
+        }
         if selected != self.selected {
             self.page = None;
             self.devtools = None;
@@ -60,11 +76,27 @@ impl Snapshot {
         self.selected = selected;
         // A queued follow may be cancelled by a rapid return to the retained
         // frontend. Resume that exact surface and its ACK, not a new epoch.
-        self.tools_open = self.tools_wanted
-            && !self.tools_target.is_empty()
-            && self.selected == self.tools_target;
-        self.tabs = tabs["tabs"].as_array().cloned().unwrap_or_default();
+        self.tools_open = tools_open;
+        self.tabs = next_tabs;
         self.revision += 1;
+    }
+
+    fn frame(&mut self, tools: bool, image: Arc<RenderImage>, visible: bool) {
+        let mut changed = false;
+        if self.error.starts_with("Frame:") {
+            self.error.clear();
+            changed = true;
+        }
+        if visible && (!tools || self.tools_open) {
+            let displayed = if tools { &mut self.devtools } else { &mut self.page };
+            if !displayed.as_ref().is_some_and(|previous| Arc::ptr_eq(previous, &image)) {
+                *displayed = Some(image);
+                changed = true;
+            }
+        }
+        if changed {
+            self.revision += 1;
+        }
     }
 
     fn queue_failed(&mut self, error: &str) {
@@ -99,6 +131,16 @@ impl Snapshot {
         self.tools_target = target;
         self.tools_open = self.tools_wanted && self.selected == self.tools_target;
         self.tools_requested_target.clear();
+        self.revision += 1;
+    }
+
+    fn tools_closed(&mut self) {
+        self.tools_open = false;
+        self.tools_wanted = false;
+        self.tools_target.clear();
+        self.tools_requested_target.clear();
+        self.devtools = None;
+        self.revision += 1;
     }
 }
 struct Command {
@@ -186,13 +228,7 @@ impl Panel {
                     .to_owned();
                 let lease = json!({"workspace":ws,"generation":generation});
                 let tabs = core.call("browser.tabs", lease.clone())?;
-                {
-                    let mut s = state.lock().unwrap();
-                    s.generation = generation.clone();
-                    s.ready = true;
-                    s.phase = Phase::Running;
-                    s.tabs(tabs);
-                }
+                state.lock().unwrap().acquired(generation.clone(), tabs);
                 let frame_core = core.clone();
                 let frame_state = state.clone();
                 let frame_lease = lease.clone();
@@ -206,6 +242,8 @@ impl Panel {
                         std::collections::HashMap::<(String, usize, u64), SurfaceState>::new();
                     let mut heartbeat = Instant::now();
                     let mut metadata = Instant::now();
+                    // Bounded to one last PNG/image per surface, not one per tab.
+                    let mut decoders = [FrameDecoder::default(), FrameDecoder::default()];
                     loop {
                         if !frame_state.lock().unwrap().ready {
                             break;
@@ -247,6 +285,9 @@ impl Panel {
                             heartbeat = Instant::now();
                         }
                         if !shown.load(Ordering::Relaxed) {
+                            for decoder in &mut decoders {
+                                decoder.clear();
+                            }
                             std::thread::park_timeout(Duration::from_millis(100));
                             continue;
                         }
@@ -273,7 +314,11 @@ impl Panel {
                                     && s.tabs.iter().any(|t| t["id"] == *id)
                             });
                         }
+                        if !tools {
+                            decoders[1].clear();
+                        }
                         if target.is_empty() {
+                            decoders[0].clear();
                             std::thread::park_timeout(Duration::from_millis(100));
                             continue;
                         }
@@ -329,7 +374,7 @@ impl Panel {
                                 if sequence <= ack {
                                     bail!("Nonmonotonic frame sequence");
                                 }
-                                let image = decode_event(&r["event"])?;
+                                let image = decoders[index].decode(&r["event"])?;
                                 Ok((sequence, image))
                             });
                             let mut s = frame_state.lock().unwrap();
@@ -352,19 +397,8 @@ impl Panel {
                                 continue;
                             }
                             match result {
-                                Ok((sequence, image)) => {
-                                    if s.error.starts_with("Frame:") {
-                                        s.error.clear();
-                                    }
-                                    let _ = sequence;
-                                    if shown.load(Ordering::Relaxed) {
-                                        if index == 0 {
-                                            s.page = Some(image);
-                                        } else if s.tools_open {
-                                            s.devtools = Some(image);
-                                        }
-                                    }
-                                    s.revision += 1;
+                                Ok((_, image)) => {
+                                    s.frame(index == 1, image, shown.load(Ordering::Relaxed));
                                 }
                                 Err(e) => {
                                     if matches!(
@@ -456,12 +490,7 @@ impl Panel {
                                 s.tools_opened(requested_target, cmd.follow);
                             }
                             if cmd.method == "browser.devtools.close" {
-                                let mut s = state.lock().unwrap();
-                                s.tools_open = false;
-                                s.tools_wanted = false;
-                                s.tools_target.clear();
-                                s.tools_requested_target.clear();
-                                s.devtools = None;
+                                state.lock().unwrap().tools_closed();
                             }
                             if cmd.method != "browser.input" && cmd.method != "browser.viewport" {
                                 if let Ok(tabs) = core.call("browser.tabs", lease.clone()) {
@@ -996,6 +1025,90 @@ mod tests {
 
     fn select(s: &mut Snapshot, target: &str) {
         s.tabs(json!({"revision":s.metadata_revision + 1,"selected":target,"tabs":[{"id":"A"},{"id":"B"}]}));
+    }
+
+    #[test]
+    fn admission_with_no_tabs_still_publishes_ready_state() {
+        let mut s = Snapshot::default();
+        s.acquired("generation".into(), json!({"revision":1,"selected":"","tabs":[]}));
+        assert!(s.ready);
+        assert_eq!(s.phase, Phase::Running);
+        assert_eq!(s.generation, "generation");
+        assert!(s.revision > 0, "readiness must not depend on a metadata difference");
+    }
+
+    #[test]
+    fn unchanged_metadata_advances_ordering_without_repainting_or_clearing_surfaces() {
+        let mut s = Snapshot::default();
+        select(&mut s, "A");
+        let revision = s.revision;
+        select(&mut s, "A");
+        assert_eq!(s.revision, revision);
+        assert_eq!(s.metadata_revision, 2);
+        // Still reject older metadata, even though the newer poll did not repaint.
+        s.tabs(json!({"revision":1,"selected":"B","tabs":[]}));
+        assert_eq!(s.selected, "A");
+        s.tabs(json!({"revision":3,"selected":"A","tabs":[{"id":"A","title":"Changed"},{"id":"B"}]}));
+        assert_eq!(s.revision, revision + 1);
+        s.tools_wanted = true;
+        s.tools_target = "A".into();
+        let metadata = json!({"revision":4,"selected":"A","tabs":s.tabs});
+        s.tabs(metadata);
+        assert!(s.tools_open, "same metadata must still reconcile frontend visibility");
+        assert_eq!(s.revision, revision + 2);
+    }
+
+    #[test]
+    fn repeated_pixels_do_not_repaint_but_restore_cleared_surfaces_and_frame_errors() {
+        use std::sync::Arc;
+        let image = Arc::new(gpui::RenderImage::new(smallvec::smallvec![image::Frame::new(
+            image::RgbaImage::new(1, 1)
+        )]));
+        let mut s = Snapshot::default();
+        s.frame(false, image.clone(), true);
+        assert_eq!(s.revision, 1);
+        s.frame(false, image.clone(), true);
+        assert_eq!(s.revision, 1, "identical texture must not request another repaint");
+        s.page = None; // hide or tab switching clears visible pixels, not decoder cache
+        s.frame(false, image.clone(), true);
+        assert!(Arc::ptr_eq(s.page.as_ref().unwrap(), &image));
+        assert_eq!(s.revision, 2);
+        s.error = "Frame: transient failure".into();
+        s.frame(false, image.clone(), true);
+        assert!(s.error.is_empty());
+        assert_eq!(s.revision, 3, "recovery must repaint even if pixels are unchanged");
+        s.error = "Input completion failed".into();
+        s.frame(false, image.clone(), true);
+        assert_eq!(s.error, "Input completion failed");
+        assert_eq!(s.revision, 3);
+        s.page = None;
+        s.frame(false, image.clone(), false);
+        assert!(s.page.is_none(), "hidden panels must not retain displayed pixels");
+        s.frame(true, image.clone(), true);
+        assert!(s.devtools.is_none(), "closed DevTools cannot receive a visible image");
+        assert_eq!(s.revision, 3);
+        s.tools_open = true;
+        s.frame(true, image.clone(), true);
+        assert!(Arc::ptr_eq(s.devtools.as_ref().unwrap(), &image));
+        assert_eq!(s.revision, 4);
+    }
+
+    #[test]
+    fn devtools_open_and_close_publish_even_when_page_and_metadata_are_unchanged() {
+        let mut s = Snapshot::default();
+        select(&mut s, "A");
+        let revision = s.revision;
+        s.tools_opened("A".into(), false);
+        assert!(s.tools_open);
+        assert!(s.revision > revision, "opening the dock needs an immediate layout update");
+        let revision = s.revision;
+        s.tools_closed();
+        select(&mut s, "A"); // same targets/title/selection from the next metadata poll
+        assert!(!s.tools_open);
+        assert!(!s.tools_wanted);
+        assert!(s.tools_target.is_empty());
+        assert!(s.devtools.is_none());
+        assert!(s.revision > revision, "closing cannot depend on different page pixels");
     }
 
     #[test]

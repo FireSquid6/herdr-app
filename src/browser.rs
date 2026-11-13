@@ -5,7 +5,7 @@
 pub mod panel;
 use anyhow::{Result, bail};
 use base64::Engine as _;
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
 // Stored using the existing mod-block envelope so older app versions can still
 // read every terminal/layout; they show a missing-mod placeholder for this slot.
@@ -98,7 +98,41 @@ pub fn decode_png(data: &str, width: u32, height: u32) -> Result<Arc<gpui::Rende
     ])))
 }
 
-pub fn decode_event(event: &serde_json::Value) -> Result<Arc<gpui::RenderImage>> {
+/// Keep exactly the last validated PNG per streamed surface. Reusing its image
+/// avoids PNG inflation, RGBA conversion and a fresh GPUI texture identity for
+/// unchanged frames. The displayed snapshot owns the pixels; a weak reference
+/// must not prolong their lifetime when it is hidden/closed. No lease/ACK caching.
+#[derive(Default)]
+pub struct FrameDecoder {
+    last: Option<(String, u32, u32, Weak<gpui::RenderImage>)>,
+}
+impl FrameDecoder {
+    pub fn decode(&mut self, event: &serde_json::Value) -> Result<Arc<gpui::RenderImage>> {
+        let (data, width, height) = frame_data(event)?;
+        if let Some((previous, w, h, image)) = &self.last {
+            if *w == width && *h == height && previous == data {
+                if let Some(image) = image.upgrade() {
+                    return Ok(image);
+                }
+            }
+        }
+        let image = decode_png(data, width, height)?;
+        self.last = Some((data.to_owned(), width, height, Arc::downgrade(&image)));
+        Ok(image)
+    }
+
+    pub fn clear(&mut self) {
+        self.last = None;
+    }
+}
+
+#[cfg(test)]
+fn decode_event(event: &serde_json::Value) -> Result<Arc<gpui::RenderImage>> {
+    let (data, width, height) = frame_data(event)?;
+    decode_png(data, width, height)
+}
+
+fn frame_data(event: &serde_json::Value) -> Result<(&str, u32, u32)> {
     if event["type"] != "frame" {
         bail!("unexpected browser event type");
     }
@@ -118,13 +152,13 @@ pub fn decode_event(event: &serde_json::Value) -> Result<Arc<gpui::RenderImage>>
     if !scale.is_finite() || !(0.5..=3.0).contains(&scale) {
         bail!("invalid frame scale");
     }
-    decode_png(
+    Ok((
         event["data"]
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("missing PNG data"))?,
         width,
         height,
-    )
+    ))
 }
 
 /// Sequence validation occurs before decode and again before texture commit.
@@ -240,6 +274,119 @@ mod tests {
                 1
             )
             .is_err()
+        );
+    }
+
+    fn frame_event(red: u8) -> serde_json::Value {
+        use image::ImageEncoder as _;
+        let mut png = Vec::new();
+        image::codecs::png::PngEncoder::new(&mut png)
+            .write_image(&[red, 0, 0, 255], 1, 1, image::ExtendedColorType::Rgba8)
+            .unwrap();
+        serde_json::json!({"type":"frame","width":1,"height":1,"scale":1,
+            "data":base64::engine::general_purpose::STANDARD.encode(&png)})
+    }
+
+    #[test]
+    fn unchanged_png_reuses_render_image_but_cache_only_retains_last_frame() {
+        let mut decoder = FrameDecoder::default();
+        let mut event = frame_event(255);
+        let first = decoder.decode(&event).unwrap();
+        event["timestamp_ms"] = 200.into();
+        let unchanged = decoder.decode(&event).unwrap();
+        assert!(Arc::ptr_eq(&first, &unchanged));
+        let changed = decoder.decode(&frame_event(0)).unwrap();
+        assert!(!Arc::ptr_eq(&first, &changed));
+        let returned = decoder.decode(&event).unwrap();
+        assert!(
+            !Arc::ptr_eq(&first, &returned),
+            "retain only one PNG, not a growing history"
+        );
+    }
+
+    #[test]
+    fn cached_frames_still_validate_metadata_and_failures_do_not_replace_good_pixels() {
+        let mut decoder = FrameDecoder::default();
+        let event = frame_event(255);
+        let first = decoder.decode(&event).unwrap();
+        for (key, value) in [
+            ("type", serde_json::json!("other")),
+            ("width", serde_json::json!(2)),
+            ("width", serde_json::json!(4_294_967_297u64)),
+            ("height", serde_json::json!(0)),
+            ("scale", serde_json::json!(4)),
+            ("data", serde_json::json!("not a PNG")),
+        ] {
+            let mut invalid = event.clone();
+            invalid[key] = value;
+            assert!(
+                decoder.decode(&invalid).is_err(),
+                "must validate {key} on cache hits too"
+            );
+            assert!(Arc::ptr_eq(&first, &decoder.decode(&event).unwrap()));
+        }
+        let mut other_surface = FrameDecoder::default();
+        assert!(!Arc::ptr_eq(&first, &other_surface.decode(&event).unwrap()));
+    }
+
+    #[test]
+    fn decoder_does_not_keep_discarded_pixels_alive() {
+        let mut decoder = FrameDecoder::default();
+        let event = frame_event(255);
+        let image = decoder.decode(&event).unwrap();
+        let weak = Arc::downgrade(&image);
+        drop(image); // the visible snapshot was cleared on hide, close or selection change
+        assert!(
+            weak.upgrade().is_none(),
+            "the cache must not own hidden decoded pixels"
+        );
+        let displayed = decoder.decode(&event).unwrap();
+        decoder.clear();
+        assert!(
+            !Arc::ptr_eq(&displayed, &decoder.decode(&event).unwrap()),
+            "clearing an inactive surface also discards its encoded PNG cache"
+        );
+    }
+
+    #[test]
+    #[ignore = "manual CPU microbenchmark; not a native rendering or end-to-end FPS test"]
+    fn benchmark_static_frame_decode() {
+        use image::ImageEncoder as _;
+        use std::{hint::black_box, time::Instant};
+        let pixels = image::RgbaImage::from_fn(1280, 720, |x, y| {
+            image::Rgba([(x % 256) as u8, (y % 256) as u8, ((x ^ y) % 256) as u8, 255])
+        });
+        let mut png = Vec::new();
+        image::codecs::png::PngEncoder::new(&mut png)
+            .write_image(pixels.as_raw(), 1280, 720, image::ExtendedColorType::Rgba8)
+            .unwrap();
+        let mut event = serde_json::json!({"type":"frame","width":1280,"height":720,"scale":1,
+            "data":base64::engine::general_purpose::STANDARD.encode(&png)});
+        const FRAMES: u64 = 30;
+        let start = Instant::now();
+        let mut displayed = None;
+        for i in 0..FRAMES {
+            event["timestamp_ms"] = i.into();
+            displayed = Some(black_box(decode_event(black_box(&event)).unwrap()));
+            black_box(&displayed);
+        }
+        let uncached = start.elapsed();
+        drop(displayed);
+        let mut decoder = FrameDecoder::default();
+        // Include the initial decode: this is a cold cache, not just string comparisons.
+        let start = Instant::now();
+        let mut displayed = None;
+        for i in 0..FRAMES {
+            event["timestamp_ms"] = i.into();
+            displayed = Some(black_box(decoder.decode(black_box(&event)).unwrap()));
+            black_box(&displayed);
+        }
+        let cached = start.elapsed();
+        drop(displayed);
+        eprintln!(
+            "static 1280x720 PNG ({} bytes), {FRAMES} frames: uncached={uncached:?}, cached={cached:?}, speedup={:.2}x",
+            png.len(),
+            uncached.as_secs_f64() / cached.as_secs_f64()
         );
     }
 
