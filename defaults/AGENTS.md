@@ -347,8 +347,15 @@ layout's look and a block can differ:
   with a slim thumb and track. Drag the thumb or click the track to jump there.
   With little or no terminal padding, the hit lane overlays the last 8px;
   terminal columns do not change. Hidden in alternate-screen programs.
+- On Linux the main window supports per-pixel transparency: UI colors accept
+  `#rrggbbaa`. To see the desktop through chrome, clear any full-window
+  `background`/layout `canvas` beneath it and paint the tint once (nested
+  80%-opaque layers become 96% opaque). Native backing is transparent, not a
+  whole-window fade. Other platforms retain their existing window backing.
 - `terminal_opacity` (0..1): below 1, the background behind a terminal
-  (a pane frame's, the layout's gradient) shows through its text.
+  (a pane frame's, the layout's gradient) shows through its text. Keep it at 1
+  and keep the terminal theme's RGB background solid for opaque terminals,
+  even when the surrounding UI is translucent.
 - Switching layouts switches the look. The theme menu changes the shown
   layout's root `theme`.
 - Today only the root's look applies; a block's own look is coming.
