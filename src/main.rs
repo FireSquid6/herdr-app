@@ -2,6 +2,8 @@
 #![cfg_attr(all(windows, not(test)), windows_subsystem = "windows")]
 
 mod bench;
+#[cfg(all(feature = "browser", target_os = "linux"))]
+mod browser;
 mod commands;
 mod control;
 mod core_bin;
@@ -78,6 +80,11 @@ fn attach_console() {
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+    // CEF helpers must run before the normal CLI, logging or any GPUI setup.
+    #[cfg(all(feature = "browser", target_os = "linux"))]
+    if let Some(code) = browser::execute_helper(&args) {
+        std::process::exit(code);
+    }
     #[cfg(target_os = "macos")]
     macos_check::startup(&args);
     #[cfg(windows)]
@@ -153,10 +160,31 @@ fn main() {
         eprintln!("herdr-app: cannot write {}: {e}", mods::app_dir().display());
     }
 
-    gpui_platform::application()
+    #[cfg(all(feature = "browser", target_os = "linux"))]
+    let mut browser_runtime = match {
+        if std::env::var_os("WAYLAND_DISPLAY").is_none() && std::env::var_os("WAYLAND_SOCKET").is_none() {
+            eprintln!("herdr-app: the browser prototype requires native Wayland (WAYLAND_DISPLAY or WAYLAND_SOCKET); X11 fallback is disabled");
+            std::process::exit(1);
+        }
+        browser::initialize()
+    } {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            eprintln!("herdr-app: browser runtime initialization failed: {error:#}");
+            std::process::exit(1);
+        }
+    };
+
+    #[cfg(all(feature = "browser", target_os = "linux"))]
+    let application = gpui_platform::linux(gpui::WindowingModes::WAYLAND);
+    #[cfg(not(all(feature = "browser", target_os = "linux")))]
+    let application = gpui_platform::application();
+    application
         // Mods run programs already; the user's own links (dotfiles, Nix) may point out.
         .with_assets(gpui_shell::AppAssets::new(mods::app_dir()).following_links())
         .run(move |cx| {
+            #[cfg(all(feature = "browser", target_os = "linux"))]
+            browser::install(cx);
             let fonts = settings::BUNDLED_FONTS.iter().map(|f| std::borrow::Cow::Borrowed(*f)).collect();
             if let Err(e) = cx.text_system().add_fonts(fonts) {
                 tracing::warn!("bundled fonts not loaded: {e:#}");
@@ -201,6 +229,8 @@ fn main() {
                 Err(need) => setup::open(need, requests, cx),
             }
         });
+    #[cfg(all(feature = "browser", target_os = "linux"))]
+    browser_runtime.shutdown();
 }
 
 /// The main window, on a connected core.

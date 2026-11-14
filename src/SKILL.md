@@ -9,7 +9,7 @@ Your terminal address is `$HC_TERMINAL_ID`; it is not a pane ID.
 ## Inspect before acting
 
 ```sh
-herdr-app ls          # spaces > tabs > terminals, including pane IDs
+herdr-app ls          # spaces > tabs > panes (browser URLs) and terminals, with IDs
 herdr-app status      # current layout, focus, overlays, zoom and file/mod errors
 herdr-app commands    # available commands, arguments and descriptions
 ```
@@ -74,6 +74,21 @@ the same tab. Give `direction` or `target`, not both. Focus stays with the same 
 ```sh
 herdr-app do pane.swap '{"pane":"p12","target":"p14"}'
 ```
+
+Browser prototype (optional Linux `browser` build, native Wayland only):
+`browser.new {url?, place?: "tab" | "right" | "down", space?, pane?}` opens a
+browser pane in an existing local space. `browser.navigate {url, pane?}` accepts
+an HTTP(S) address or search terms. `browser.back`, `browser.forward`,
+`browser.reload`, `browser.stop` and `browser.focus_address` take optional `pane`
+(default: focused browser). Configure `browser_url` (Google by default) and
+`browser_search` (`https://www.google.com/search?q={query}`) in settings.json;
+customize commands through keys or a mod. Normal pane split/focus/zoom/close works.
+Only last committed URL is layout-persisted, not history/forms; cookies/site data
+may persist in the app home's per-space `browser-profiles/`. Hidden panes stay
+live; removing or retargeting a pane discards its session. Cross-space moves are
+blocked. Remote spaces are blocked, never silently routed through local networking;
+SSH browser routing is not implemented. Disabled/other-OS builds preserve panes
+with an explanatory placeholder and return unavailable for browser commands.
 
 `terminal.search` opens a find bar in the focused terminal. It searches that
 terminal's screen and scrollback; Enter and Shift-Enter move between matches,

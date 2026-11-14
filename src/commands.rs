@@ -28,6 +28,14 @@ const fn cmd(name: &'static str, args: &'static [Arg], about: &'static str) -> C
 }
 
 pub const COMMANDS: &[Command] = &[
+    // Browser commands stay discoverable on builds without the optional runtime.
+    cmd("browser.new", &[opt("url"), opt("place"), opt("space"), opt("pane")], "Open a browser pane (Linux browser feature only): place tab (default), right or down. URL defaults to browser_url; remote spaces are blocked."),
+    cmd("browser.navigate", &[req("url"), opt("pane")], "Navigate a browser pane (default: focused) to a URL or search using browser_search."),
+    cmd("browser.back", &[opt("pane")], "Go back in the browser pane's live session."),
+    cmd("browser.forward", &[opt("pane")], "Go forward in the browser pane's live session."),
+    cmd("browser.reload", &[opt("pane")], "Reload a browser pane."),
+    cmd("browser.stop", &[opt("pane")], "Stop loading a browser pane."),
+    cmd("browser.focus_address", &[opt("pane")], "Focus and select the browser pane's address field."),
     // What exists.
     cmd("space.new", &[opt("name"), opt("folder"), opt("tab"), opt("argv"), opt("task"), opt("machine")],
         "Make a space: its name (default: none, so it's called after where its first terminal is), the folder its terminals start in (default: the focused terminal's), its first tab's name (default: none, so it's called by its number), optionally an agent (argv) and its first message (task), and the machine it lives on (`hc machine ls`; default the focused space's machine for keys and clicks, this computer for scripts; empty string: this computer; its terminals start in that machine's home unless folder)."),
@@ -170,6 +178,16 @@ mod tests {
     use super::*;
 
     /// The guide agents read (written to the home folder) names every command.
+    #[test]
+    fn browser_commands_are_configurable_and_validate_pane_targets() {
+        for name in ["browser.new", "browser.navigate", "browser.back", "browser.forward", "browser.reload", "browser.stop", "browser.focus_address"] {
+            let c = find(name).expect("browser command in catalog");
+            assert!(validate_args(c, &json!({"pane": 123})).is_err());
+        }
+        assert_eq!(shorthand(find("browser.navigate").unwrap(), "example.com"), json!({"url":"example.com"}));
+        assert_eq!(missing(find("browser.navigate").unwrap(), &json!({})), Some("url"));
+    }
+
     #[test]
     fn the_guide_names_every_command() {
         let guide = include_str!("../defaults/AGENTS.md");

@@ -5,6 +5,8 @@
 //! derived from the palette (dark or light by its background), so every
 //! theme is consistent and overrides only need what they change.
 
+pub(crate) mod browser;
+
 use crate::vt::Rgb;
 use gpui::{Hsla, Pixels, Rgba, px};
 use serde::{Deserialize, Serialize};
@@ -392,6 +394,10 @@ pub struct Person {
     /// A draggable scroll position thumb at a terminal pane's right edge.
     #[serde(skip_serializing_if = "is_true")]
     pub pane_scrollbars: bool,
+    /// Default URL for new browser panes (optional Linux prototype).
+    pub browser_url: String,
+    /// HTTP(S) search URL template; {query} is percent-encoded.
+    pub browser_search: String,
     /// Minimum terminal text contrast ratio; 1 leaves program colors unchanged.
     pub minimum_contrast: f32,
     /// macOS Option sends Alt shortcuts, or follows the keyboard layout.
@@ -455,6 +461,8 @@ impl Default for Person {
             telemetry: true,
             clipboard_write: true,
             pane_scrollbars: true,
+            browser_url: browser::DEFAULT_URL.into(),
+            browser_search: browser::DEFAULT_SEARCH.into(),
             minimum_contrast: 1.0,
             option_as_alt: OptionAsAlt::Auto,
             appearance: Appearance::System,
@@ -948,4 +956,11 @@ mod tests {
         let missing: Vec<&String> = keys.iter().filter(|k| !section.contains(&format!("`{k}`"))).collect();
         assert!(missing.is_empty(), "defaults/AGENTS.md (## The person) doesn't explain: {missing:?}");
     }
+}
+
+/// Shared with the optional browser's address field. Read live settings on submit.
+#[cfg(all(feature = "browser", target_os = "linux"))]
+pub fn browser_target(input: &str) -> String {
+    let person = load_person().unwrap_or_default();
+    browser::target(input, &person.browser_search)
 }

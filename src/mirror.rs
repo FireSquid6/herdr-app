@@ -234,6 +234,20 @@ mod tests {
         m
     }
     #[test]
+    fn browser_documents_keep_only_last_url_and_owning_machine() {
+        let mut model = Model::default();
+        model.add_space("work", "", "", Tab::with_pane("tab", "Browser", Node::block("web", Content::Browser { url: "https://example.com/latest".into() })));
+        let doc = Document::capture(&model, None);
+        let saved = serde_json::to_value(&doc).unwrap();
+        assert_eq!(saved["spaces"][0]["tabs"][0]["root"]["children"][0]["content"], serde_json::json!({"url":"https://example.com/latest"}));
+        let restored: Document = serde_json::from_value(saved).unwrap();
+        let mut remote = Model::default();
+        restored.replace(&mut remote, Some("vps"));
+        assert_eq!(remote.space_of("vps/web").unwrap().machine.as_deref(), Some("vps"));
+        assert_eq!(remote.tab_of("vps/web").unwrap().root.find("vps/web").unwrap().content(), Some(&Content::Browser { url: "https://example.com/latest".into() }));
+    }
+
+    #[test]
     fn focus_zoom_and_settle_are_private() {
         let mut m = model();
         let before = Document::capture(&m, None);

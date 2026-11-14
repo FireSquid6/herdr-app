@@ -11,6 +11,8 @@ use serde_json::Value;
 #[serde(untagged)]
 pub enum Content {
     Terminal { terminal: String },
+    /// A browser pane. Only its last URL belongs to the layout document.
+    Browser { url: String },
     Mod {
         #[serde(rename = "mod")]
         name: String,
@@ -471,7 +473,7 @@ impl Node {
 
     /// A pane in a tab: a terminal, or a mod beside them (a viewer, a board).
     pub fn is_pane(&self) -> bool {
-        matches!(self.content(), Some(Content::Terminal { .. } | Content::Mod { .. }))
+        matches!(self.content(), Some(Content::Terminal { .. } | Content::Mod { .. } | Content::Browser { .. }))
     }
 
     pub fn closable(&self) -> bool {
@@ -737,6 +739,18 @@ pub fn snap(x: f32, y: f32, w: f32, h: f32) -> (Edge, Align) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn browser_panes_round_trip_last_url_and_participate_in_splits() {
+        let content: Content = serde_json::from_value(serde_json::json!({"url":"https://example.com/path"})).unwrap();
+        let mut root = Node::container("tab", Axis::Row, vec![Node::block("web", content.clone())]);
+        assert!(root.find("web").unwrap().is_pane());
+        assert!(root.split("web", Axis::Column, term("shell"), "split".into()));
+        assert_eq!(root.panes().len(), 2);
+        assert_eq!(serde_json::to_value(content).unwrap(), serde_json::json!({"url":"https://example.com/path"}));
+        assert!(root.remove("web").is_some());
+        assert_eq!(root.panes().len(), 1);
+    }
 
     #[test]
     fn floats_snap_to_the_nearest_edge_and_third() {

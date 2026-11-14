@@ -17,6 +17,66 @@ Actions use the current selection unless you give an explicit target.
 Some actions close terminals; read their descriptions before running them.
 Mods can add their own actions, which are not listed here.
 
+## `browser.new`
+
+Open a browser pane (Linux browser feature only): place tab (default), right or down. URL defaults to browser_url; remote spaces are blocked.
+
+| Argument | Required |
+|---|---|
+| `url` | no |
+| `place` | no |
+| `space` | no |
+| `pane` | no |
+
+## `browser.navigate`
+
+Navigate a browser pane (default: focused) to a URL or search using browser_search.
+
+| Argument | Required |
+|---|---|
+| `url` | yes |
+| `pane` | no |
+
+## `browser.back`
+
+Go back in the browser pane's live session.
+
+| Argument | Required |
+|---|---|
+| `pane` | no |
+
+## `browser.forward`
+
+Go forward in the browser pane's live session.
+
+| Argument | Required |
+|---|---|
+| `pane` | no |
+
+## `browser.reload`
+
+Reload a browser pane.
+
+| Argument | Required |
+|---|---|
+| `pane` | no |
+
+## `browser.stop`
+
+Stop loading a browser pane.
+
+| Argument | Required |
+|---|---|
+| `pane` | no |
+
+## `browser.focus_address`
+
+Focus and select the browser pane's address field.
+
+| Argument | Required |
+|---|---|
+| `pane` | no |
+
 ## `space.new`
 
 Make a space: its name (default: none, so it's called after where its first terminal is), the folder its terminals start in (default: the focused terminal's), its first tab's name (default: none, so it's called by its number), optionally an agent (argv) and its first message (task), and the machine it lives on (`hc machine ls`; default the focused space's machine for keys and clicks, this computer for scripts; empty string: this computer; its terminals start in that machine's home unless folder).

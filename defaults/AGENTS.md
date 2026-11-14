@@ -584,6 +584,30 @@ The main ones:
   `terminal.show` fail, as do `terminal.open`/`terminal.keep` with place right/down.
   They never act on the terminal's source pane. An explicit `pane` still targets that
   model pane; composition edits belong to the mod (edit its layout instead).
+- Browser prototype (Linux, optional `browser` build, native Wayland only):
+  `browser.new {url?, place?: "tab" | "right" | "down", space?, pane?}` opens
+  a browser tab or split; New menu > Browser does the same. A space must exist.
+  `space` applies only to a new tab; split placement follows its target `pane`.
+  `browser.navigate {url, pane?}` accepts an HTTP(S) address or search terms;
+  `browser.back {pane?}`, `browser.forward {pane?}`, `browser.reload {pane?}`,
+  `browser.stop {pane?}`, `browser.focus_address {pane?}` target the focused
+  browser by default. `herdr-app ls` includes each tab's `panes` with browser
+  pane IDs and last URLs; the existing `terminals` array remains available. Bind these in `keys.json` or invoke from a personal mod;
+  no browser shortcuts are imposed. Explicit global/layout keys take precedence
+  while a browser or its address field has focus; unbound editing keys stay there.
+  Browser panes use normal pane focus, split, swap, zoom and close, and cannot
+  move across spaces. Remote creation fails closed; restored remote panes show
+  a blocked placeholder, never direct local networking. SSH browser routing is
+  not implemented. Builds without browser support preserve saved panes and show
+  an explanatory placeholder; browser commands report unavailable.
+  A model block's content is `{ "url": "https://example.com" }`. Only its last
+  committed URL is saved in the layout document, not navigation history, forms,
+  scroll position or back/forward state. Browser pages start on first visible
+  render, stay live in hidden tabs and behind zoom, and close when their pane
+  disappears or its owning space/machine changes. Local CEF profiles live under
+  `browser-profiles/` in the app home, isolated per space (cookies/site storage
+  may persist there). This is an experimental fork, not a production browser or
+  a completed security/performance audit.
 - Terminals: `terminal.open {argv?, folder?, place?, name?}` (`folder` sets the
   starting directory for tabs and right/down splits, with or without `argv`), `terminal.kill {terminal}`,
   `terminal.keep {terminal, place?}`, `terminal.park {terminal}`,
@@ -647,7 +671,7 @@ From a shell:
 ```sh
 herdr-app do tab.new --name "fix login" --argv '["claude"]' --task "look at the login bug"
 herdr-app do pane.split:right
-herdr-app ls          # spaces, their tabs and terminals (sub-agents under their parent)
+herdr-app ls          # spaces, tabs, panes (browser URLs included), and terminals
 herdr-app status      # what's on screen: layout, focus, overlays, zoom, errors from files and mods
 herdr-app commands    # every command and its arguments
 ```
@@ -740,6 +764,13 @@ What's about the user, never a look:
   `p` writes Linux primary selection. `s` is ignored; cut buffers `0`–`7`
   are treated as the system clipboard.
   Clipboard reads (`?`) are never allowed.
+- `browser_url`: the initial URL for `browser.new` when omitted (default
+  `https://www.google.com`). Optional Linux browser prototype only.
+- `browser_search`: HTTP(S) search template, default
+  `https://www.google.com/search?q={query}`. `{query}` is replaced with
+  percent-encoded search terms. An invalid/non-HTTP(S) template or one without
+  `{query}` uses the default. Address-bar searches and `browser.navigate` share
+  this setting; changes apply on the next submission.
 - `pane_scrollbars`: `false` hides the scroll position thumb at a terminal
   pane's right edge (default `true`). It shows only when the pane has
   scrollback — never on the alternate screen (editors, pagers) — and

@@ -645,6 +645,21 @@ mod tests {
     use super::*;
 
     #[test]
+    fn browser_panes_split_focus_zoom_close_and_cannot_cross_spaces() {
+        let mut m = model_with_one();
+        m.split_with("x1", Axis::Row, Node::block("web", Content::Browser { url: "https://example.com".into() }));
+        assert_eq!(m.focused_pane().as_deref(), Some("web"));
+        m.tab_of_mut("web").unwrap().zoomed = Some("web".into());
+        m.focus_pane("x1");
+        assert_eq!(m.active_tab().unwrap().zoomed.as_deref(), Some("x1"));
+        m.add_space("other", "", "", Tab::new("other-tab", "", "other-pane", "t-other"));
+        assert!(!m.move_pane("web", "other-pane", None));
+        assert!(m.swap_panes("web", "other-pane").is_err());
+        m.remove_pane("web");
+        assert!(m.tab_of("web").is_none());
+    }
+
+    #[test]
     fn folders_name_as_in_herdr_on_every_system() {
         assert_eq!(folder_name("/home/can", "/home/can"), "~");
         assert_eq!(folder_name("/home/can/", "/home/can"), "~");
