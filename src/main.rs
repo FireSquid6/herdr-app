@@ -224,9 +224,43 @@ pub fn open_main(core: std::sync::Arc<hc::Core>, requests: async_channel::Receiv
                 window_decorations: Some(WindowDecorations::Client),
                 // Herdr Dev and other side-by-side builds get their own dock icon.
                 app_id: Some(std::env::var("HERDR_APP_ID").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "herdr-app".into())),
-                ..Default::default()
+                ..main_window_options()
             };
             cx.open_window(options, |window, cx| cx.new(|cx| window::AppWindow::new(core, requests, window, cx)))
                 .expect("cannot open the Herdr window");
             cx.activate(true);
+}
+
+fn main_window_options() -> WindowOptions {
+    WindowOptions {
+        // Linux needs an alpha-capable native backing for translucent UI colors,
+        // independent of client/server decoration changes. Opaque terminal cells
+        // still paint their own background; this is not whole-window opacity.
+        window_background: if cfg!(target_os = "linux") {
+            WindowBackgroundAppearance::Transparent
+        } else {
+            WindowBackgroundAppearance::default()
+        },
+        ..Default::default()
+    }
+}
+
+#[cfg(test)]
+mod native_window_tests {
+    use super::main_window_options;
+    use crate::settings;
+    use gpui::WindowBackgroundAppearance;
+
+    #[test]
+    fn linux_main_window_allows_per_surface_alpha_without_fading_terminals() {
+        let options = main_window_options();
+        let expected = if cfg!(target_os = "linux") {
+            WindowBackgroundAppearance::Transparent
+        } else {
+            WindowBackgroundAppearance::default()
+        };
+        assert_eq!(options.window_background, expected);
+        // Native backing does not change the terminal's independent paint opacity.
+        assert_eq!(settings::Settings::default().terminal_opacity, 1.0);
+    }
 }
