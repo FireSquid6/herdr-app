@@ -99,6 +99,26 @@ blocked. Remote spaces are blocked, never silently routed through local networki
 SSH browser routing is not implemented. Disabled/other-OS builds preserve panes
 with an explanatory placeholder and return unavailable for browser commands.
 
+Mixed splitting is also discoverable in pane menus: terminal right-click (or
+Shift+right-click) and the customizable browser chrome's **Pane menu** icon both offer
+**Split right → Terminal / Browser** and **Split down → Terminal / Browser**.
+They create a neighbor, not a tab move or content replacement. Use explicit
+`pane` when scripting an unfocused target:
+
+```sh
+herdr-app do pane.split --direction down --pane p12
+herdr-app do browser.new --place right --pane p12
+```
+
+Both are independently bindable (`pane.split:right` / `pane.split:down`, or typed
+`browser.new` args with `place: "right"` / `"down"`). `browser.new:right` is not a
+split binding: its shorthand argument is URL. Remote browser choices are visibly
+blocked; browser-free builds report unavailable without disabling Terminal.
+The default chrome retains Pane menu on restored browser placeholders for terminal split, zoom and close.
+Both entry points respect the layout's `terminal_menu` override and its overlay
+dimensions. Browser menu targets have `pane` but no `terminal`; personal menus
+should guard terminal-only actions.
+
 `terminal.search` opens a find bar in the focused terminal. It searches that
 terminal's screen and scrollback; Enter and Shift-Enter move between matches,
 Escape closes the bar while its find field has focus, and each terminal keeps its own query (reopening selects it, so typing replaces it).

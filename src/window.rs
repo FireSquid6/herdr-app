@@ -5678,6 +5678,46 @@ mod tests {
     }
 
     #[test]
+    fn mixed_split_browser_rejections_leave_existing_content_untouched() {
+        in_own_process("mixed_split_browser_rejections");
+    }
+
+    #[gpui::test]
+    fn mixed_split_browser_rejections(cx: &mut gpui::TestAppContext) {
+        use serde_json::json;
+        if !running_alone("mixed_split_browser_rejections") { return; }
+        let (view, cx) = open_window(cx, "fixture", "", json!({
+            "id": "root", "type": "row", "children": []
+        }));
+        view.update_in(cx, |this, window, cx| {
+            for remote in [false, true] {
+                // Local creation needs a real browser runtime, verified in the
+                // isolated acceptance harness; rejections never need a page/core.
+                if !remote && cfg!(all(feature = "browser", target_os = "linux")) { continue; }
+                for browser_source in [false, true] {
+                    this.model = super::Model::default();
+                    let content = if browser_source {
+                        super::Content::Browser { url: "https://source.invalid".into() }
+                    } else { super::Content::Terminal { terminal: "t1".into() } };
+                    this.model.add_space("s1", "Fixture", "/fixture", crate::model::Tab::with_pane(
+                        "tab1", "Fixture", super::Node::block("p1", content)));
+                    this.model.space_mut("s1").unwrap().machine = remote.then(|| "remote-fixture".into());
+                    let before = this.model.tab("tab1").unwrap().root.clone();
+                    for place in ["right", "down"] {
+                        let result = this.run_as("browser.new", json!({"place":place,"pane":"p1"}), false, window, cx);
+                        let error = result["error"].as_str().expect("creation must fail closed");
+                        if cfg!(all(feature = "browser", target_os = "linux")) {
+                            assert!(error.contains("Remote browser route unavailable") && error.contains("blocked"), "{error}");
+                        } else { assert!(error.contains("Browser unavailable"), "{error}"); }
+                        assert_eq!(this.model.tab("tab1").unwrap().root, before);
+                        assert_eq!(this.model.focused_pane().as_deref(), Some("p1"));
+                    }
+                }
+            }
+        });
+    }
+
+    #[test]
     fn layout_terminals_survive_stream_loss_until_confirmed_closed() {
         in_own_process("layout_terminal_stream_loss");
     }
@@ -6081,6 +6121,8 @@ export default class SystemToast extends View {
             "id": "root", "type": "row", "toast": "chosen", "terminal_menu": "chosen", "children": []
         });
         let (view, cx) = open_window(cx, "chosen", "", layout);
+        std::fs::write(crate::mods::app_dir().join("mods/chosen/mod.json"),
+            r#"{"place":"none","overlay":{"width":310,"height":120}}"#).unwrap();
         let check_handlers = |cx: &mut gpui::VisualTestContext| {
             view.update_in(cx, |this, window, cx| {
                 let id = crate::mods::new_overlay_id();
@@ -6092,6 +6134,17 @@ export default class SystemToast extends View {
                 this.open_menu("tab", json!({}), None, window, cx);
                 let id = this.overlays.last().unwrap().id.clone();
                 assert_eq!(this.copies[&format!("overlay:{id}")].inst.name, "chosen");
+                this.close_overlay(&id, window, cx);
+                // Browser Pane ⋯ uses this same path, without a terminal target.
+                this.open_menu("pane", json!({"pane":"browser-target"}), None, window, cx);
+                let overlay = this.overlays.last().unwrap();
+                assert_eq!(overlay.size.width, 310.0);
+                assert_eq!(overlay.size.height, 120.0);
+                let id = overlay.id.clone();
+                let inst = &this.copies[&format!("overlay:{id}")].inst;
+                assert_eq!(inst.name, "chosen");
+                assert_eq!(inst.props["tab"], "pane");
+                assert_eq!(inst.props["target"], json!({"pane":"browser-target"}));
                 this.close_overlay(&id, window, cx);
             });
         };

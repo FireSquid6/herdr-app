@@ -170,6 +170,14 @@ Split a pane (default: the focused one) "right" or "down" with a new terminal, o
 | `mod` | no |
 | `props` | no |
 
+## `pane.menu`
+
+Open the layout-selected pane menu (default: focused pane), including browser and unavailable panes.
+
+| Argument | Required |
+|---|---|
+| `pane` | no |
+
 ## `pane.close`
 
 Close a pane and end its terminal.

@@ -265,7 +265,8 @@ Properties any node can have:
   without it the person sees a plain frame. New layouts and `themes/*.json`
   show up in settings by themselves.
 - Root only: `"terminal_menu": "my-menu"` chooses the mod for terminal
-  right-clicks (including Shift+right-click). Omit it for the shipped `menu`;
+  right-clicks (including Shift+right-click) and browser **Pane menu** actions.
+  Omit it for the shipped `menu`;
   an unknown mod logs a warning and falls back to `menu`. Clone a shipped
   layout before changing this field. Other menus are unchanged.
 - Root only: `"toast": "my-toast"` chooses the mod that shows notifications
@@ -302,6 +303,46 @@ export default class MyMenu extends View {
   }
 }
 ```
+
+### Mixed pane menus
+
+The shipped terminal right-click menu and the browser chrome's **Pane menu** icon offer
+**Split right → Terminal / Browser** and **Split down → Terminal / Browser**.
+Choose a direction, then the new pane type; Back (or Left/Escape) returns to the
+pane actions. Up/Down and Enter work in both levels; Escape at the root closes.
+The browser button is trusted, customizable chrome mod UI, outside website
+content, and calls `pane.menu`; it stays available on restored browser
+placeholders using the default chrome. It respects the layout's
+`terminal_menu` override and that mod's overlay dimensions, just like terminal
+right-click. Browser targets have `target.pane` but no `target.terminal`, so a
+personal menu must guard terminal-only actions. The shipped menu does this.
+
+Both choices add a new neighbor in the target pane's tab and space, never move
+an existing tab or replace a page. Menus always pass the clicked pane's ID, even
+if another pane has focus. Terminal uses `pane.split {direction, pane}`; Browser
+uses `browser.new {place: "right" | "down", pane}`. New panes receive focus and
+clear pane zoom; normal divider resizing, zoom and close still apply. On a remote
+space Browser is marked `remote blocked` and cannot be selected; Terminal still
+starts on that machine. Without browser support, choosing Browser reports
+`Browser unavailable` through the normal command error notification; Terminal
+remains usable. The host also rejects direct remote browser commands.
+
+All four actions can be bound separately without editing the menu. Merge only
+wanted bindings into your own `keys.json`; no default shortcuts are changed:
+
+```json
+{ "global": {
+  "ctrl-shift-o": "pane.split:right",
+  "ctrl-shift-j": "pane.split:down",
+  "ctrl-shift-u": { "command": "browser.new", "args": { "place": "right" } },
+  "ctrl-shift-i": { "command": "browser.new", "args": { "place": "down" } }
+} }
+```
+
+Those keys target the focused pane; add `pane` in typed args for a fixed target.
+Do not use `browser.new:right`: the string shorthand fills `url`, not `place`.
+Shipped menu updates follow the normal personal-copy migration; your customized
+terminal menu, keys and layout are not overwritten by these choices.
 
 ### The look: on the layout, cascading
 
