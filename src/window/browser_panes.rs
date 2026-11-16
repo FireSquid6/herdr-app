@@ -60,28 +60,29 @@ impl AppWindow {
             let visible: Vec<_> = if self.shows_tab() {
                 self.model.active_space().into_iter().flat_map(|space| {
                     space.active_tab().into_iter().flat_map(move |tab| tab.shown().visible_blocks().into_iter().filter_map(move |node| {
-                        let Content::Browser { url } = node.content()? else { return None };
-                        Some((node.id.clone(), space.id.clone(), space.machine.clone(), url.clone()))
+                        let Content::Browser { url, tabs } = node.content()? else { return None };
+                        Some((node.id.clone(), space.id.clone(), space.machine.clone(), url.clone(), tabs.clone()))
                     }))
                 }).collect()
             } else { Vec::new() };
             for (pane, slot) in &self.browsers {
-                let shown = visible.iter().any(|(id, _, _, _)| id == pane);
+                let shown = visible.iter().any(|(id, _, _, _, _)| id == pane);
                 slot.view.update(cx, |view, cx| {
                     let copy = self.copies.get(&format!("{pane}#browser"));
                     view.set_chrome(copy.and_then(|c| c.root.clone()), copy.map_or(0, |c| c.id), cx);
+                    if !shown { view.set_visible(false, window, cx); }
+                    if let Some(Content::Browser { url, tabs }) = self.model.tab_of(pane).and_then(|t|t.root.find(pane)).and_then(|n|n.content()) {
+                        view.sync_tabs(tabs.clone(), url, window, cx);
+                    }
                     view.set_visible(shown, window, cx);
                 });
             }
-            for (pane, workspace, machine, url) in visible {
+            for (pane, workspace, machine, url, tabs) in visible {
                 if let Some(slot) = self.browsers.get_mut(&pane) {
-                    if slot.url != url {
-                        slot.url = url.clone();
-                        slot.view.update(cx, |view, cx| view.navigate(url, window, cx));
-                    }
+                    slot.url = url.clone();
                     continue;
                 }
-                let options = BrowserOptions { workspace: workspace.clone(), pane: pane.clone(), url: url.clone(), profile_root: mods::app_dir().join("browser-profiles"), remote: machine.is_some() };
+                let options = BrowserOptions { workspace: workspace.clone(), pane: pane.clone(), url: url.clone(), tabs, profile_root: mods::app_dir().join("browser-profiles"), remote: machine.is_some() };
                 let Some(runtime) = self.runtime.clone() else { continue };
                 let view = cx.new(|cx| BrowserPane::new(options, runtime, window, cx));
                 if let Some(copy) = self.copies.get(&format!("{pane}#browser")) {
@@ -93,13 +94,18 @@ impl AppWindow {
                 let events = cx.subscribe_in(&view, window, move |this, source, event: &BrowserEvent, window, cx| {
                     // A queued event from an old owner/session must never update its replacement.
                     if !this.browsers.get(&target).is_some_and(|s| s.workspace == owner && s.machine == on && s.view == *source) { return; }
-                    let BrowserEvent::Navigated(url) = event;
+                    let BrowserEvent::Navigated { tab: browser_tab, url } = event;
                     if let Some(tab) = this.model.tab_of(&target).map(|t| t.id.clone())
                         && let Some(node) = this.model.tab_mut(&tab).and_then(|t| t.root.find_mut(&target))
-                        && let Kind::Block { content: Content::Browser { url: saved } } = &mut node.kind
+                        && let Kind::Block { content: Content::Browser { url: saved, tabs } } = &mut node.kind
                     {
-                        *saved = url.clone();
-                        if let Some(slot) = this.browsers.get_mut(&target) { slot.url = url.clone(); }
+                        tabs.ensure(saved);
+                        let Some(item) = tabs.items.iter_mut().find(|t| &t.id == browser_tab) else { return };
+                        item.url = url.clone();
+                        if tabs.selected == *browser_tab {
+                            *saved = url.clone();
+                            if let Some(slot) = this.browsers.get_mut(&target) { slot.url = url.clone(); }
+                        }
                         this.save();
                         this.publish(cx);
                         this.flush_documents(false, window, cx);
@@ -119,7 +125,13 @@ impl AppWindow {
 
     pub(super) fn browser_chrome_instance(&self, pane: &str, url: &str) -> (String, Instance) {
         #[cfg(not(all(feature = "browser", target_os = "linux")))]
+        let mut tabs = self.model.tab_of(pane).and_then(|t|t.root.find(pane)).and_then(|n| match n.content() { Some(Content::Browser { tabs, .. }) => Some(tabs.clone()), _ => None }).unwrap_or_default();
+        #[cfg(not(all(feature = "browser", target_os = "linux")))]
+        tabs.ensure(url);
+        #[cfg(not(all(feature = "browser", target_os = "linux")))]
         crate::browser_chrome::publish_state(pane, json!({
+            "selected_tab":tabs.selected, "active_tab":tabs.selected,
+            "tabs":tabs.items.iter().map(|t|json!({"id":t.id,"url":t.url,"title":t.url,"favicon":null,"loading":false,"loaded":false,"visible":false,"browser_id":null,"frame_copies":0,"frame_uploads":0})).collect::<Vec<_>>(),
             "pane": pane, "workspace": self.model.space_of(pane).map(|s| s.id.as_str()).unwrap_or(""),
             "url": url, "loading": false, "can_back": false, "can_forward": false,
             "remote": self.model.space_of(pane).is_some_and(|s| s.machine.is_some()),
@@ -169,7 +181,85 @@ impl AppWindow {
         frame.child("Browser unavailable: requires the optional Linux browser build and runtime.").into_any_element()
     }
 
+    fn browser_tab_command(&mut self, name: &str, args: &Value, window: &mut Window, cx: &mut Context<Self>) -> Result<Value, String> {
+        for key in ["tab", "url"] {
+            if args.get(key).is_some_and(|v|!v.is_null() && !v.is_string()) { return Err(format!("{name} {key} must be a string")); }
+        }
+        let pane = Self::owned(args, "pane").or_else(|| self.model.focused_pane()).ok_or("no browser pane focused")?;
+        let space = self.model.space_of(&pane).ok_or("no such browser pane")?;
+        if name == "browser.tab.new" {
+            if space.machine.is_some() { return Err("Remote browser route unavailable: direct networking is blocked".into()); }
+            #[cfg(not(all(feature = "browser", target_os = "linux")))]
+            return Err("Browser unavailable: new pages require the optional Linux browser build and runtime".into());
+        }
+        let machine = space.machine.clone();
+        self.require_document(machine.as_deref())?;
+        let tab = self.model.tab_of(&pane).ok_or("no such browser pane")?.id.clone();
+        // Only this exact browser-only final workspace may skip the terminal
+        // confirmation. Never authorize closing a space containing any terminal.
+        let empty_browser_space = (space.tabs.len() == 1
+            && space.tabs[0].root.panes().len() == 1
+            && space.tabs[0].root.terminals().is_empty()
+            && space.tabs[0].root.walk().iter().all(|node|node.content().is_none_or(|content|matches!(content, Content::Browser { .. }))))
+            .then(|| space.id.clone());
+        let id = self.model.fresh_id("bt");
+        let node = self.model.tab_mut(&tab).and_then(|t| t.root.find_mut(&pane)).ok_or("no such browser pane")?;
+        let closable = node.closable();
+        let Kind::Block { content: Content::Browser { url, tabs } } = &mut node.kind else { return Err("target is not a browser pane".into()) };
+        let mut next = tabs.clone();
+        next.ensure(url);
+        let target = Self::arg(args, "tab").unwrap_or(&next.selected).to_owned();
+        let ok = match name {
+            "browser.tab.new" => {
+                let input = Self::arg(args, "url").unwrap_or(&self.person.browser_url);
+                next.insert(id.clone(), settings::browser::target(input, &self.person.browser_search)); true
+            }
+            "browser.tab.select" => next.select(&target),
+            "browser.tab.close" => next.close(&target),
+            "browser.tab.move" => {
+                let index = args.get("index").and_then(Value::as_u64).ok_or("browser.tab.move index must be a nonnegative integer")?;
+                next.move_to(&target, index as usize)
+            }
+            _ => false,
+        };
+        if !ok { return Err("no such browser tab".into()); }
+        if next.items.is_empty() && !closable { return Err("this browser pane is not closable".into()); }
+        if next.items.is_empty() {
+            // Keep the original durable list until the owning pane is gone.
+            // A failed nested close must neither regenerate an initial tab nor
+            // be overwritten by this command's successful-looking result.
+            if let Some(space) = empty_browser_space {
+                self.dispatch("space.close", &json!({"id":space,"confirmed":true}), false, window, cx);
+            } else {
+                self.dispatch("pane.close", &json!({"pane":pane}), false, window, cx);
+            }
+            if let Some(error) = self.reply.take().and_then(|v|v.get("error").and_then(Value::as_str).map(str::to_owned)) {
+                return Err(error);
+            }
+            if self.model.tab_of(&pane).is_some() { return Err("browser pane was not closed".into()); }
+        } else {
+            *url = next.url().unwrap().into();
+            *tabs = next;
+            #[cfg(all(feature = "browser", target_os = "linux"))]
+            self.reconcile_browser_selection(&pane, window, cx);
+        }
+        Ok(json!({"pane":pane,"tab":if name == "browser.tab.new" { id } else { target }}))
+    }
+
+    /// Resolve model selection before any selected-page operation, without
+    /// creating a browser or making a hidden pane visible. Context-menu/async
+    /// entrypoints must use this before capturing their native page identity.
+    #[cfg(all(feature = "browser", target_os = "linux"))]
+    pub(super) fn reconcile_browser_selection(&mut self, pane: &str, window: &mut Window, cx: &mut Context<Self>) -> Option<Entity<BrowserPane>> {
+        self.discard_stale_browsers(window, cx);
+        let Content::Browser { url, tabs } = self.model.tab_of(pane)?.root.find(pane)?.content()? else { return None };
+        let view = self.browsers.get(pane)?.view.clone();
+        view.update(cx, |view, cx| view.sync_tabs(tabs.clone(), url, window, cx));
+        Some(view)
+    }
+
     pub(super) fn browser_command(&mut self, name: &str, args: &Value, window: &mut Window, cx: &mut Context<Self>) -> Result<Value, String> {
+        if name.starts_with("browser.tab.") { return self.browser_tab_command(name, args, window, cx); }
         #[cfg(not(all(feature = "browser", target_os = "linux")))]
         { let _ = (name, args, window, cx); Err("Browser unavailable: requires the optional Linux browser build and runtime".into()) }
         #[cfg(all(feature = "browser", target_os = "linux"))]
@@ -195,7 +285,7 @@ impl AppWindow {
                 if owner.machine.is_some() { return Err("Remote browser route unavailable: direct networking is blocked".into()); }
                 self.require_document(None)?;
                 let pane = self.model.fresh_id("p");
-                let node = Node::block(pane.clone(), Content::Browser { url });
+                let node = Node::block(pane.clone(), Content::Browser { url, tabs: Default::default() });
                 if place == "tab" {
                     let tab = self.model.fresh_id("tb");
                     self.model.add_tab(&space, Tab::with_pane(&tab, "Browser", node));
@@ -209,12 +299,17 @@ impl AppWindow {
             let pane = Self::owned(args, "pane").or_else(|| self.model.focused_pane()).ok_or("no browser pane focused")?;
             let space = self.model.space_of(&pane).ok_or("no such browser pane")?;
             if space.machine.is_some() { return Err("Remote browser route unavailable: direct networking is blocked".into()); }
+            // sync() alone does not render. Queued select/new + page actions
+            // must never reach the formerly selected native browser/frame.
+            self.reconcile_browser_selection(&pane, window, cx);
             let tab = self.model.tab_of(&pane).ok_or("no such browser pane")?.id.clone();
             let node = self.model.tab_mut(&tab).and_then(|t| t.root.find_mut(&pane)).ok_or("no such browser pane")?;
-            let Kind::Block { content: Content::Browser { url } } = &mut node.kind else { return Err("target is not a browser pane".into()) };
+            let Kind::Block { content: Content::Browser { url, tabs } } = &mut node.kind else { return Err("target is not a browser pane".into()) };
             if name == "browser.navigate" {
                 let input = Self::arg(args, "url").ok_or("browser.navigate url must be a string")?;
                 *url = settings::browser::target(input, &self.person.browser_search);
+                tabs.ensure(url);
+                if let Some(item) = tabs.items.iter_mut().find(|t|t.id == tabs.selected) { item.url = url.clone(); }
                 if let Some(slot) = self.browsers.get_mut(&pane) {
                     slot.url = url.clone();
                     slot.view.update(cx, |view, cx| view.navigate(url.clone(), window, cx));

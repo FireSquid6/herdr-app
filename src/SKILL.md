@@ -78,8 +78,19 @@ herdr-app do pane.swap '{"pane":"p12","target":"p14"}'
 Browser prototype (optional Linux `browser` build, native Wayland only):
 `browser.new {url?, place?: "tab" | "right" | "down", space?, pane?}` opens a
 browser pane in an existing local space. `browser.navigate {url, pane?}` accepts
-an HTTP(S) address or search terms. `browser.back`, `browser.forward`,
-`browser.reload`, `browser.stop` and `browser.focus_address` take optional `pane`
+an HTTP(S) address or search terms.
+Browser panes have independent browser tabs (not Herdr workspace tabs).
+`browser.tab.new {pane?, url?}` opens the configured homepage by default;
+`browser.tab.select {pane?, tab}`, `browser.tab.move {pane?, tab, index}`
+(zero-based), and `browser.tab.close {pane?, tab?}` select/reorder/close them.
+Closing the last closes its pane. The globally selected `browser_chrome` mod
+owns the tab strip; `browserState(pane).tabs` and `.active_tab` expose it.
+Loaded inactive tabs retain live state/history without hidden frame uploads.
+Restart restores IDs/order/URLs/selection lazily, not forms/JS/history.
+`BrowserPage(pane)` and legacy navigation commands still target the selected page.
+
+`browser.back`, `browser.forward`, `browser.reload`, `browser.stop` and
+`browser.focus_address` take optional `pane`
 (default: focused browser). Configure `browser_url` (Google by default) and
 `browser_search` (`https://www.google.com/search?q={query}`) in settings.json;
 customize commands through keys or a mod. `browser_chrome` selects one global
@@ -92,12 +103,13 @@ mod code or command arguments. See the installed AGENTS.md/API declarations.
 Normal pane split/focus/zoom/close works. `pane.menu {pane?}` opens the
 layout-selected pane menu (also on blocked/unavailable pages), preserving its
 custom dimensions and missing-mod fallback.
-Only last committed URL is layout-persisted, not history/forms; cookies/site data
+Tab IDs/order/selection and last committed URLs are layout-persisted, not history/forms; cookies/site data
 may persist in the app home's per-space `browser-profiles/`. Hidden panes stay
 live; removing or retargeting a pane discards its session. Cross-space moves are
 blocked. Remote spaces are blocked, never silently routed through local networking;
 SSH browser routing is not implemented. Disabled/other-OS builds preserve panes
-with an explanatory placeholder and return unavailable for browser commands.
+with an explanatory placeholder. Restored tab inspection/selection/reordering/closing
+remain available; new native pages and page navigation report unavailable.
 
 Mixed splitting is also discoverable in pane menus: terminal right-click (or
 Shift+right-click) and the customizable browser chrome's **Pane menu** icon both offer

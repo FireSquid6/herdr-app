@@ -628,22 +628,37 @@ The main ones:
   model pane; composition edits belong to the mod (edit its layout instead).
 - Browser prototype (Linux, optional `browser` build, native Wayland only):
   `browser.new {url?, place?: "tab" | "right" | "down", space?, pane?}` opens
-  a browser tab or split; New menu > Browser does the same. A space must exist.
+  a browser pane in a workspace tab or split; New menu > Browser does the same. A space must exist.
   `space` applies only to a new tab; split placement follows its target `pane`.
+  Each browser pane has its own independent live browser tabs. Use
+  `browser.tab.new {pane?, url?}` (configured homepage by default),
+  `browser.tab.select {pane?, tab}`, `browser.tab.move {pane?, tab, index}`
+  (zero-based index), and `browser.tab.close {pane?, tab?}` (selected by default).
+  Closing the last browser tab closes the pane; `browser.new` still creates a pane.
+  The global `browser_chrome` mod owns the horizontal title/favicon/loading/close/+
+  strip; drag between tabs to reorder. Tabs shrink to a minimum then scroll.
+  `browserState(pane)` / `BrowserPage(pane)` describe/render the selected tab;
+  state also provides `tabs`, `active_tab` and its alias `selected_tab`. Loaded inactive tabs stay alive
+  with their JS/forms/history but do not upload hidden frames. Layout documents
+  save IDs, order, selected tab and URLs, not live JS/forms/history. On restart,
+  only selected tabs of visible panes load; other tabs load when selected.
+  URL-only browser panes migrate without losing URLs or surrounding layout.
+  All tabs/panes in a workspace share its profile, isolated from other workspaces.
   `browser.navigate {url, pane?}` accepts an HTTP(S) address or search terms;
   `browser.back {pane?}`, `browser.forward {pane?}`, `browser.reload {pane?}`,
   `browser.stop {pane?}`, `browser.focus_address {pane?}` target the focused
   browser by default. `herdr-app ls` includes each tab's `panes` with browser
-  pane IDs and last URLs; the existing `terminals` array remains available. Bind these in `keys.json` or invoke from a personal mod;
+  pane IDs, last URLs, durable `browser_tabs` and live `browser_state`; the existing `terminals` array remains available. Bind these in `keys.json` or invoke from a personal mod;
   no browser shortcuts are imposed. Explicit global/layout keys take precedence
   while a browser or its address field has focus; unbound editing keys stay there.
   Browser panes use normal pane focus, split, swap, zoom and close, and cannot
   move across spaces. Remote creation fails closed; restored remote panes show
   a blocked placeholder, never direct local networking. SSH browser routing is
   not implemented. Builds without browser support preserve saved panes and show
-  an explanatory placeholder; browser commands report unavailable.
-  A model block's content is `{ "url": "https://example.com" }`. Only its last
-  committed URL is saved in the layout document, not navigation history, forms,
+  an explanatory placeholder; new native pages/navigation report unavailable, but restored tab selection, reordering and closing remain available.
+  Legacy content `{ "url": "https://example.com" }` remains readable. Tabbed
+  content adds `tabs: {items: [{id, url}], selected: id}` and keeps `url` for the
+  selected tab. Only durable IDs/order/selection/URLs are saved, not history, forms,
   scroll position or back/forward state. Browser pages start on first visible
   render, stay live in hidden tabs and behind zoom, and close when their pane
   disappears or its owning space/machine changes. Local CEF profiles live under

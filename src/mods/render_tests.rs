@@ -1091,9 +1091,18 @@ fn browser_chrome_is_a_replaceable_description(cx: &mut TestAppContext) {
     cx.update(gpui_shell::init);
     let staged = Staged::new();
     let mut values = fixture(false, json!({"pane":"p1"}), updates("current", "current"));
-    values.insert("browserState".into(), json!({"pane":"p1", "workspace":"s1", "url":"https://example.com", "loading":true, "can_back":false, "can_forward":true}));
+    values.insert("browserState".into(), json!({"pane":"p1", "workspace":"s1", "url":"https://example.com", "loading":true, "can_back":false, "can_forward":true,
+        "active_tab":"a", "selected_tab":"a", "tabs":[
+            {"id":"a","url":"https://example.com","title":"<script>run('app.quit')</script>","loading":true,"favicon":"browser-favicons/owned.png"},
+            {"id":"b","url":"https://other.test","title":"Other tab","loading":false,"favicon":null}
+        ]}));
     let tree = describe_with_values(cx, &staged, "mods/browser-chrome", values.clone(), None).unwrap();
     assert!(tree.contains("browser-toolbar"), "{tree}");
+    for control in ["browser-tab-strip", "browser-tab-scroll", "browser-tab-a", "browser-tab-b", "browser-tab-close-a", "browser-tab-close-b", "browser-tab-new"] {
+        assert!(tree.contains(control), "missing {control}: {tree}");
+    }
+    assert!(tree.contains("<script>run('app.quit')</script>"), "page title must remain inert text: {tree}");
+    assert!(tree.contains("browser-favicons/owned.png"), "favicon must use local decoded asset: {tree}");
     assert!(tree.contains("Stop"), "{tree}");
     assert!(tree.contains("browser-address"), "{tree}");
     let back = tree.lines().find(|line| line.contains("browser-back")).unwrap();
@@ -1156,4 +1165,57 @@ fn browser_address_focus_is_explicit_and_rerender_never_steals_it(cx: &mut TestA
     }).unwrap();
     drop(session);
     cx.run_until_parked();
+}
+
+/// Materialize the shipped chrome through the real Shell Scrollable wrapper;
+/// report *laid-out* sizes through test-only on_size_change observers. No debug
+/// selectors (which disappear in optimized builds), mock flex engine or CEF.
+#[gpui::test]
+fn browser_tab_strip_shrinks_to_minimum_before_native_scroll_overflow(cx: &mut TestAppContext) {
+    use gpui::{Context, Entity, IntoElement, ParentElement, Render, Styled, Window, div, px};
+    struct Host { root: Entity<gpui_shell::ShellRoot>, width: f32 }
+    impl Render for Host {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().w(px(self.width)).h(px(160.)).child(self.root.clone())
+        }
+    }
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let path = staged.0.join("mods/browser-chrome/main.js");
+    let source = std::fs::read_to_string(&path).unwrap()
+        .replace("browserState, props", "measure, browserState, props")
+        .replace(".id(`browser-tab-${tab.id}`)", ".id(`browser-tab-${tab.id}`).on_size_change(size => measure(tab.id, size.width))")
+        .replace(".id(\"browser-tab-scroll\")", ".id(\"browser-tab-scroll\").on_size_change(size => measure('scroll', size.width))")
+        .replace("action(\"tab.new\")))", "action(\"tab.new\")).on_size_change(size => measure('new', size.width)))");
+    std::fs::write(path, source).unwrap();
+    let mut values = fixture(false, json!({"pane":"fixture"}), updates("current", "current"));
+    values.insert("browserState".into(), json!({"pane":"fixture","workspace":"s","url":"https://fixture.test","selected_tab":"a","tabs":[
+        {"id":"a","url":"https://a.test","title":"A","loading":false},
+        {"id":"b","url":"https://b.test","title":"B","loading":false}
+    ]}));
+    let measured = Rc::new(RefCell::new(BTreeMap::<String, f64>::new()));
+    let sizes = measured.clone();
+    let module = module(values, Rc::new(RefCell::new(Calls::default()))).function("measure", move |a| {
+        sizes.borrow_mut().insert(a.string(0)?.into(), from_host(a.value(1)?).as_f64().unwrap());
+        Ok(HostValue::Null)
+    }).declarations(format!("{DECLARATIONS}\nexport function measure(id: string, width: number): void;"));
+    let root = staged.wrapper("mods/browser-chrome", "");
+    gpui_shell::policy::set_default(Policy::new().with_host_module(module).unwrap());
+    let runtime = ShellRuntime::new_isolated_with_components(crate::browser_chrome::components()).unwrap();
+    let (host, cx) = cx.add_window_view(|window, cx| Host {
+        root: runtime.try_load(&root, window, cx).unwrap(), width: 500.,
+    });
+    gpui_shell::policy::set_default(Policy::new());
+    for (width, viewport, tab_width) in [(500., 469., 180.), (334., 303., 150.), (191., 160., 90.)] {
+        host.update(cx, |host, cx| { host.width = width; cx.notify(); });
+        // Size observers dispatch on the following frame, then the actual view
+        // rerenders with its measured viewport. Let both layout passes settle.
+        for _ in 0..5 { cx.run_until_parked(); cx.update(|window, cx| { let _ = window.draw(cx); }); }
+        let sizes = measured.borrow();
+        for (id, expected) in [("a", tab_width), ("b", tab_width), ("scroll", viewport), ("new", 28.)] {
+            let actual = *sizes.get(id).unwrap_or_else(||panic!("missing native measurement {id}: {sizes:?}"));
+            assert!((actual - expected).abs() < 1., "strip {width}, {id}: expected {expected}, got {actual}; {sizes:?}");
+        }
+    }
+    cx.update(|window, _| window.remove_window());
 }

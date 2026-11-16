@@ -423,7 +423,16 @@ export function watchFolder(path: string): Promise<string[]>;
 /** Trusted browser state. Website URLs/errors are plain untrusted text, never code or HTML.
  * Null when the pane has no chrome owner. Browser-free builds return available: false.
  */
+export interface BrowserTabState {
+  id: string; url: string; title: string; loading: boolean;
+  /** Local decoded PNG asset fetched through this page's workspace RequestContext; never a remote image URL. */
+  favicon: string | null;
+  /** Native lifecycle diagnostics; browser_id stays stable across selection changes. */
+  loaded: boolean; visible: boolean; browser_id: number | null;
+  frame_copies: number; frame_uploads: number;
+}
 export interface BrowserState {
+  tabs: BrowserTabState[]; active_tab: string; selected_tab: string;
   pane: string; workspace: string; url: string;
   loading: boolean; can_back: boolean; can_forward: boolean;
   remote: boolean; closed: boolean; available: boolean; error: string | null;

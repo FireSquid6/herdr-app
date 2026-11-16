@@ -647,7 +647,7 @@ mod tests {
     #[test]
     fn browser_panes_split_focus_zoom_close_and_cannot_cross_spaces() {
         let mut m = model_with_one();
-        m.split_with("x1", Axis::Row, Node::block("web", Content::Browser { url: "https://example.com".into() }));
+        m.split_with("x1", Axis::Row, Node::block("web", Content::Browser { url: "https://example.com".into(), tabs: Default::default() }));
         assert_eq!(m.focused_pane().as_deref(), Some("web"));
         m.tab_of_mut("web").unwrap().zoomed = Some("web".into());
         m.focus_pane("x1");
@@ -666,16 +666,16 @@ mod tests {
                 for axis in [Axis::Row, Axis::Column] {
                     let mut m = model_with_one();
                     if source_browser {
-                        *m.tab_mut("c1").unwrap().root.find_mut("x1").unwrap() = Node::block("x1", Content::Browser { url: "https://source.invalid".into() });
+                        *m.tab_mut("c1").unwrap().root.find_mut("x1").unwrap() = Node::block("x1", Content::Browser { url: "https://source.invalid".into(), tabs: Default::default() });
                     }
                     let source = serde_json::to_value(m.tab("c1").unwrap().root.find("x1").unwrap().content()).unwrap();
                     m.add_tab("p1", Tab::with_pane("existing-tab", "Existing browser",
-                        Node::block("existing-web", Content::Browser { url: "https://existing.invalid".into() })));
+                        Node::block("existing-web", Content::Browser { url: "https://existing.invalid".into(), tabs: Default::default() })));
                     // Split an explicitly targeted pane, not the currently focused tab.
                     let existing = serde_json::to_value(&m.tab("existing-tab").unwrap().root).unwrap();
                     m.tab_mut("c1").unwrap().zoomed = Some("x1".into());
                     let new = if new_browser {
-                        Node::block("neighbor", Content::Browser { url: "https://new.invalid".into() })
+                        Node::block("neighbor", Content::Browser { url: "https://new.invalid".into(), tabs: Default::default() })
                     } else { pane("neighbor", "new-terminal") };
                     assert!(m.split_with("x1", axis, new));
                     let tab = m.tab("c1").unwrap();

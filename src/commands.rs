@@ -29,6 +29,10 @@ const fn cmd(name: &'static str, args: &'static [Arg], about: &'static str) -> C
 
 pub const COMMANDS: &[Command] = &[
     // Browser commands stay discoverable on builds without the optional runtime.
+    cmd("browser.tab.new", &[opt("pane"), opt("url")], "Create and select a browser tab; defaults to the configured homepage."),
+    cmd("browser.tab.select", &[opt("pane"), req("tab")], "Select a browser tab without recreating its page."),
+    cmd("browser.tab.close", &[opt("pane"), opt("tab")], "Close a browser tab (selected by default); the last closes its pane."),
+    cmd("browser.tab.move", &[opt("pane"), req("tab"), req("index")], "Move a browser tab to a zero-based index within its pane."),
     cmd("browser.new", &[opt("url"), opt("place"), opt("space"), opt("pane")], "Open a browser pane (Linux browser feature only): place tab (default), right or down. URL defaults to browser_url; remote spaces are blocked."),
     cmd("browser.navigate", &[req("url"), opt("pane")], "Navigate a browser pane (default: focused) to a URL or search using browser_search."),
     cmd("browser.back", &[opt("pane")], "Go back in the browser pane's live session."),

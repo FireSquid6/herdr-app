@@ -1192,7 +1192,7 @@ impl AppWindow {
         let visit = |n: &Node, terms: &mut Vec<(String, String)>, mods: &mut Vec<(String, Instance)>| match n.content() {
             Some(Content::Terminal { terminal }) => terms.push((n.id.clone(), terminal.clone())),
             Some(Content::Mod { name, props }) => mods.push((n.id.clone(), Instance { name: name.clone(), props: props.clone() })),
-            Some(Content::Browser { url }) => mods.push(self.browser_chrome_instance(&n.id, url)),
+            Some(Content::Browser { url, .. }) => mods.push(self.browser_chrome_instance(&n.id, url)),
             _ => {}
         };
         let stacks = |root: &Node, mods: &mut Vec<(String, Instance)>| {
@@ -1296,7 +1296,7 @@ impl AppWindow {
                 if let Some(Content::Mod { name, props }) = n.content() {
                     out.insert(n.id.clone(), inst(name, props));
                 }
-                if let Some(Content::Browser { url }) = n.content() {
+                if let Some(Content::Browser { url, .. }) = n.content() {
                     let (slot, instance) = self.browser_chrome_instance(&n.id, url);
                     out.insert(slot, instance);
                 }
@@ -1770,7 +1770,7 @@ impl AppWindow {
                 for p in ctx.root.panes() {
                     let focused = m.active.as_deref() == Some(pr.id.as_str()) && focused_pane.as_deref() == Some(p.id.as_str());
                     let zoomed = ctx.zoomed.as_deref() == Some(p.id.as_str());
-                    if let Some(Content::Browser { url }) = p.content() {
+                    if let Some(Content::Browser { url, .. }) = p.content() {
                         panes.push(json!({"pane":p.id,"terminal":null,"browser":true,"url":url,"tab":ctx.id,"title":url,"focused":focused,"zoomed":zoomed,"movable":self.pane_movable(&p.id)}));
                         continue;
                     }
@@ -3048,7 +3048,7 @@ impl AppWindow {
                 }
             }
             // ---- browser panes (commands remain discoverable without the feature)
-            "browser.new" | "browser.navigate" | "browser.back" | "browser.forward" | "browser.reload" | "browser.stop" | "browser.focus_address" => {
+            "browser.tab.new" | "browser.tab.select" | "browser.tab.close" | "browser.tab.move" | "browser.new" | "browser.navigate" | "browser.back" | "browser.forward" | "browser.reload" | "browser.stop" | "browser.focus_address" => {
                 let result = self.browser_command(name, a, window, cx);
                 self.answer(result);
             }
@@ -3902,7 +3902,7 @@ impl AppWindow {
                     .map(|c| {
                         let terms: Vec<Value> = c.root.terminals().iter().filter_map(|n| Some(terminal(&n.id, n.terminal()?))).collect();
                         let panes: Vec<Value> = c.root.panes().iter().filter_map(|n| match n.content()? {
-                            Content::Browser { url } => Some(json!({ "pane": n.id, "browser": true, "url": url })),
+                            Content::Browser { url, tabs } => Some(json!({ "pane": n.id, "browser": true, "url": url, "browser_tabs": tabs, "browser_state": crate::browser_chrome::state(&n.id) })),
                             Content::Mod { name, props } => Some(json!({ "pane": n.id, "mod": name, "props": props })),
                             Content::Terminal { terminal: address } => Some(terminal(&n.id, address)),
                             _ => None,
@@ -5697,7 +5697,7 @@ mod tests {
                 for browser_source in [false, true] {
                     this.model = super::Model::default();
                     let content = if browser_source {
-                        super::Content::Browser { url: "https://source.invalid".into() }
+                        super::Content::Browser { url: "https://source.invalid".into(), tabs: Default::default() }
                     } else { super::Content::Terminal { terminal: "t1".into() } };
                     this.model.add_space("s1", "Fixture", "/fixture", crate::model::Tab::with_pane(
                         "tab1", "Fixture", super::Node::block("p1", content)));
@@ -6193,7 +6193,7 @@ export default class SystemToast extends View {
         }));
         std::fs::write(crate::mods::mods_dir().join("personal-pane-menu/mod.json"), r#"{"place":"none","overlay":{"width":310,"height":120}}"#).unwrap();
         cx.update(|window, cx| view.update(cx, |this, cx| {
-            this.model.add_space("s1", "blocked", "/fixture", super::Tab::with_pane("tab1", "Browser", super::Node::block("p1", super::Content::Browser { url: "https://example.com".into() })));
+            this.model.add_space("s1", "blocked", "/fixture", super::Tab::with_pane("tab1", "Browser", super::Node::block("p1", super::Content::Browser { url: "https://example.com".into(), tabs: Default::default() })));
             this.model.space_mut("s1").unwrap().machine = Some("remote".into());
             let reply = this.run_as("pane.menu", json!({"pane":"p1"}), false, window, cx);
             assert!(reply.get("error").is_none(), "{reply}");

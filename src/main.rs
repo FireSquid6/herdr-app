@@ -5,6 +5,7 @@ mod bench;
 #[cfg(all(feature = "browser", target_os = "linux"))]
 mod browser;
 mod browser_chrome;
+mod browser_tabs;
 mod commands;
 mod control;
 mod core_bin;

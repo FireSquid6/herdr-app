@@ -1,0 +1,25 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Tab A fixture</title>
+<link rel="icon" href="/favicon.png" type="image/png">
+<h1>Tab A fixture</h1>
+<label>Unsaved form <input id="draft" value="initial"></label>
+<button id="increment" onclick="window.counter++;render()">Increment live JS</button>
+<output id="counter"></output>
+<button id="probe" onclick="render()">Report live state in title</button>
+<a id="history" href="/next.html">Next history entry</a>
+<script>
+window.instance = crypto.randomUUID();
+window.counter = 0;
+function render() {
+  const value = `${window.instance}:${window.counter}:${document.querySelector('#draft').value}`;
+  document.querySelector('#counter').textContent = value;
+  document.title = `Tab A fixture · ${value}`;
+}
+document.querySelector('#draft').addEventListener('input', render);
+document.addEventListener('visibilitychange', render);
+render();
+// Chromium should throttle this page once hidden, and Herdr must never upload
+// its hidden paints. This keeps visible frames changing for counter assertions.
+setInterval(() => { document.body.style.backgroundColor = `hsl(${Date.now()%360} 40% 90%)`; }, 40);
+</script>
