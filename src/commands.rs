@@ -28,6 +28,23 @@ const fn cmd(name: &'static str, args: &'static [Arg], about: &'static str) -> C
 }
 
 pub const COMMANDS: &[Command] = &[
+    // Browser commands stay discoverable on builds without the optional runtime.
+    cmd("browser.tab.new", &[opt("pane"), opt("url")], "Create and select a browser tab; defaults to the configured homepage."),
+    cmd("browser.tab.select", &[opt("pane"), req("tab")], "Select a browser tab without recreating its page."),
+    cmd("browser.tab.close", &[opt("pane"), opt("tab")], "Close a browser tab (selected by default); the last closes its pane."),
+    cmd("browser.tab.move", &[opt("pane"), req("tab"), req("index")], "Move a browser tab to a zero-based index within its pane."),
+    cmd("browser.new", &[opt("url"), opt("place"), opt("space"), opt("pane")], "Open a browser pane (Linux browser feature only): place tab (default), right or down. URL defaults to browser_url; remote spaces are blocked."),
+    cmd("browser.navigate", &[req("url"), opt("pane")], "Navigate a browser pane (default: focused) to a URL or search using browser_search."),
+    cmd("browser.back", &[opt("pane")], "Go back in the browser pane's live session."),
+    cmd("browser.forward", &[opt("pane")], "Go forward in the browser pane's live session."),
+    cmd("browser.reload", &[opt("pane")], "Reload a browser pane."),
+    cmd("browser.stop", &[opt("pane")], "Stop loading a browser pane."),
+    cmd("browser.focus_address", &[opt("pane")], "Focus and select the browser pane's address field."),
+    cmd("browser.copy", &[opt("pane")], "Copy text from the focused browser page or address editor; page requests complete asynchronously."),
+    cmd("browser.cut", &[opt("pane")], "Cut text from the focused browser page or address editor; page requests complete asynchronously."),
+    cmd("browser.paste", &[opt("pane")], "Paste text into the focused browser page or address editor; page requests acknowledge dispatch, not insertion."),
+    cmd("browser.address_context", &[opt("pane"), req("owner"), opt("selection")], "Open a trusted address menu bound to its native owner and focused editor."),
+    cmd("browser.context_action", &[opt("pane"), req("token"), req("action")], "Consume a one-shot trusted page context-menu action."),
     // What exists.
     cmd("space.new", &[opt("name"), opt("folder"), opt("tab"), opt("argv"), opt("task"), opt("machine")],
         "Make a space: its name (default: none, so it's called after where its first terminal is), the folder its terminals start in (default: the focused terminal's), its first tab's name (default: none, so it's called by its number), optionally an agent (argv) and its first message (task), and the machine it lives on (`hc machine ls`; default the focused space's machine for keys and clicks, this computer for scripts; empty string: this computer; its terminals start in that machine's home unless folder)."),
@@ -40,6 +57,7 @@ pub const COMMANDS: &[Command] = &[
     cmd("tab.rename", &[opt("id"), opt("name")], "Rename a tab (asks the person when no name; an empty name: called by its number again)."),
     cmd("tab.move", &[req("id"), req("index")], "Move a tab to a position in its space (1 = first)."),
     cmd("pane.split", &[req("direction"), opt("pane"), opt("argv"), opt("mod"), opt("props")], "Split a pane (default: the focused one) \"right\" or \"down\" with a new terminal, or with a mod (`mod`, its `props`) beside it."),
+    cmd("pane.menu", &[opt("pane")], "Open the layout-selected pane menu (default: focused pane), including browser and unavailable panes."),
     cmd("pane.close", &[opt("pane")], "Close a pane and end its terminal."),
     cmd("terminal.open", &[opt("argv"), opt("folder"), opt("place"), opt("name")], "Start a terminal: as a new tab (place \"tab\", default), or \"right\"/\"down\" of the focused pane."),
     cmd("terminal.keep", &[req("terminal"), opt("place")], "Give a running terminal without a pane (a sub-agent) a pane: a new tab, or \"right\"/\"down\"."),
@@ -171,6 +189,16 @@ mod tests {
 
     /// The guide agents read (written to the home folder) names every command.
     #[test]
+    fn browser_commands_are_configurable_and_validate_pane_targets() {
+        for name in ["browser.new", "browser.navigate", "browser.back", "browser.forward", "browser.reload", "browser.stop", "browser.focus_address"] {
+            let c = find(name).expect("browser command in catalog");
+            assert!(validate_args(c, &json!({"pane": 123})).is_err());
+        }
+        assert_eq!(shorthand(find("browser.navigate").unwrap(), "example.com"), json!({"url":"example.com"}));
+        assert_eq!(missing(find("browser.navigate").unwrap(), &json!({})), Some("url"));
+    }
+
+    #[test]
     fn the_guide_names_every_command() {
         let guide = include_str!("../defaults/AGENTS.md");
         let missing: Vec<&str> = COMMANDS.iter().map(|c| c.name).filter(|n| !guide.contains(&format!("`{n}"))).collect();
@@ -198,7 +226,7 @@ mod tests {
 
     #[test]
     fn malformed_targets_cannot_fall_back_to_the_current_work() {
-        for (name, arg) in [("tab.close", "id"), ("pane.close", "pane"), ("space.close", "id"), ("tab.new", "space"), ("terminal.show", "terminal"), ("pane.swap", "pane"), ("pane.swap", "target")] {
+        for (name, arg) in [("tab.close", "id"), ("pane.close", "pane"), ("pane.menu", "pane"), ("space.close", "id"), ("tab.new", "space"), ("terminal.show", "terminal"), ("pane.swap", "pane"), ("pane.swap", "target")] {
             let c = find(name).unwrap();
             for value in [json!(123), json!(false), json!([]), json!({"id": "target"})] {
                 let error = validate_args(c, &json!({arg: value})).unwrap_err();

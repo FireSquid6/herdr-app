@@ -1,0 +1,42 @@
+{
+  "legacy_read_isolation": {
+    "run": "/home/firesquid/.cache/herdr-browser-prototype/clipboard-transport-proof/legacy-evidence-1794810611108875168",
+    "settings": {
+      "javascript_access_clipboard": "DISABLED",
+      "javascript_dom_paste": "DISABLED",
+      "CLIPBOARD_READ_WRITE": "BLOCK",
+      "permission_prompt_handler": "DENY"
+    },
+    "attempted": 11,
+    "passed": 11,
+    "failed": 0,
+    "legacy_execCommand_paste_false_unchanged_no_event": 3,
+    "navigator_readText_denied": 3,
+    "navigator_read_denied": 3,
+    "conditions": [
+      "A-focused-nonactivated",
+      "A-focused-click-activated",
+      "B-independent-background"
+    ],
+    "browser_native_paste_exact_trusted_default": true,
+    "browser_native_paste_exact_trusted_canceled_unchanged": true,
+    "native_paste_data_empty": false,
+    "native_paste_data_utf16_length": 36,
+    "raw_seed_logged": false,
+    "clean_close_and_shutdown": true,
+    "remaining_owned_processes_snapshot": [],
+    "helper_classifier_tests_passed": 4,
+    "previous_summary_and_Rust_behavior_unchanged": true,
+    "previous_renderer_paste_failures": 20,
+    "previous_renderer_paste_empty_cause": "UNDETERMINED; no policy-fix inference",
+    "receipt_scope": "stock CEF 156 owned-fixture semantics and tested unattended READ gate only; not production acceptance or proof of all read paths",
+    "production_accepted": false,
+    "OS_clipboard_claim": false,
+    "source_hashes": {
+      "legacy_probe.rs": "a4c37adcfb9955e131255a1d65dcd62b868c79c178932ea4871eac7dba5ab036",
+      "legacy_scenarios.rs": "508c9709d5b83f8e704350fb0094189093c6d2faa7c0933513617cc684a80b69",
+      "legacy-fixture.js": "469c91c595b9cc0cc9a5d1e85b6eb380da87c8bba39deed9af39b43a4926e64f",
+      "run-legacy.sh": "a1e8d015ef823df5a59ede0972c01fb6fa8889ad5a5e6b3955971f03ee93c4fc"
+    }
+  }
+}

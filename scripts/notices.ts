@@ -41,7 +41,7 @@ if (version.exitCode !== 0 || version.stdout.toString().trim() !== "cargo-about 
   throw new Error("Install cargo-about 0.9.3 (see licenses/README.md)");
 }
 const generated = Bun.spawnSync([
-  tool, "generate", "--locked", "--fail", "scripts/notices.hbs",
+  tool, "generate", "--locked", "--all-features", "--fail", "scripts/notices.hbs",
 ], { stdout: "pipe", stderr: "inherit" });
 if (generated.exitCode !== 0) throw new Error("cargo-about failed");
 

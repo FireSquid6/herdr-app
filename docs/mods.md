@@ -18,6 +18,16 @@ herdr-app status
 
 The check loads a mod and renders it once. It does not replace looking at the result in the window.
 
+The shipped `menu` offers two-level mixed split choices from a terminal's context
+menu or the browser chrome's **Pane menu** icon. A personal terminal menu can do the same
+using its explicit `props().target.pane` with `pane.split {direction, pane}` or
+`browser.new {place: "right" | "down", pane}`. Do not substitute the focused pane
+or use `browser.new:right` (that shorthand fills URL). Keep Terminal available
+when Browser is unavailable or remote-blocked; the host enforces browser policy.
+The customizable browser chrome calls `pane.menu`, which respects
+the layout's `terminal_menu` customization, including the mod's overlay width
+and height. Browser targets have no `target.terminal`; guard terminal-only items.
+
 Mods can run programs, read files and use the network. Only install code you trust.
 See [security and privacy](security.md).
 

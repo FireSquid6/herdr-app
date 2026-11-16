@@ -5,6 +5,7 @@
 //! anything: keys, mods, menus and agents all run them.
 
 use crate::hc::Core;
+mod browser_panes;
 mod floats;
 mod movable;
 mod pane_drag;
@@ -373,6 +374,12 @@ pub struct AppWindow {
     model: Model,
     /// Terminal views by block id (panes and chrome terminal blocks).
     terms: HashMap<String, Term>,
+    #[cfg(all(feature = "browser", target_os = "linux"))]
+    browsers: HashMap<String, browser_panes::BrowserSlot>,
+    #[cfg(all(feature = "browser", target_os = "linux"))]
+    browser_keys: browser_panes::BrowserKeys,
+    #[cfg(all(feature = "browser", target_os = "linux"))]
+    _browser_keys: Option<Subscription>,
     /// Mod copies by slot (block id, `<stack>#header`, or `overlay:<id>`).
     copies: HashMap<String, Copy>,
     overlays: Vec<Overlay>,
@@ -461,7 +468,7 @@ pub struct AppWindow {
 
 impl AppWindow {
     pub fn new(core: Arc<Core>, requests: async_channel::Receiver<Request>, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let runtime = ShellRuntime::new(cx).map_err(|e| tracing::error!("script runtime failed, mods are off: {e:#}")).ok();
+        let runtime = ShellRuntime::new_with_components(cx, crate::browser_chrome::components()).map_err(|e| tracing::error!("script runtime failed, mods are off: {e:#}")).ok();
         let file_events = crate::files::watch(&mods::app_dir(), #[cfg(test)] cx.background_executor().clone());
         if let (Some(runtime), Some(events)) = (&runtime, &file_events) {
             runtime.set_source_revision_provider(events.revision_provider());
@@ -487,6 +494,12 @@ impl AppWindow {
             float_leave: HashMap::new(),
             model: Model::default(),
             terms: HashMap::new(),
+            #[cfg(all(feature = "browser", target_os = "linux"))]
+            browsers: HashMap::new(),
+            #[cfg(all(feature = "browser", target_os = "linux"))]
+            browser_keys: Default::default(),
+            #[cfg(all(feature = "browser", target_os = "linux"))]
+            _browser_keys: None,
             copies: HashMap::new(),
             overlays: Vec::new(),
             folders: mods::scan().into_iter().map(|f| (f.id.clone(), f)).collect(),
@@ -547,6 +560,8 @@ impl AppWindow {
             _place: None,
             place_write: None,
         };
+        #[cfg(all(feature = "browser", target_os = "linux"))]
+        { w._browser_keys = Some(w.install_browser_keys(cx)); }
         w._focus_lost = Some(cx.on_focus_lost(window, |this, window, cx| this.restore_focus(window, cx)));
         w._place = Some(cx.observe_window_bounds(window, |this, window, cx| {
             if let Some(t) = crate::place::changed(window, cx) {
@@ -873,8 +888,10 @@ impl AppWindow {
         if s_time.is_none() || s_time != self.watched.settings {
             let loaded = settings::load_person();
             crate::telemetry::set_setting(settings::telemetry_setting(&loaded));
+            let mut browser_chrome_changed = false;
             match loaded {
                 Ok(p) => {
+                    browser_chrome_changed = self.person.browser_chrome != p.browser_chrome;
                     self.person = p;
                     let _ = std::fs::remove_file(file("settings.error"));
                 }
@@ -882,12 +899,21 @@ impl AppWindow {
             }
             self.watched.settings = mtime(&settings::path());
             self.apply_look(window, cx);
+            // Chrome copies are model-owned slots, not part of the composed
+            // look. Reconcile even when only this setting changed (including
+            // switching away from a failed mod), without waiting for navigation.
+            if browser_chrome_changed {
+                self.sync(window, cx);
+                cx.notify();
+            }
         }
         let k_time = mtime(&crate::keys::path());
         if k_time.is_none() || k_time != self.watched.keys {
             match crate::keys::load() {
                 Ok(bindings) => {
                     crate::keys::install(bindings, cx);
+                    #[cfg(all(feature = "browser", target_os = "linux"))]
+                    self.browser_keys.reload();
                     let _ = std::fs::remove_file(file("keys.error"));
                 }
                 Err(e) => {
@@ -1166,6 +1192,7 @@ impl AppWindow {
         let visit = |n: &Node, terms: &mut Vec<(String, String)>, mods: &mut Vec<(String, Instance)>| match n.content() {
             Some(Content::Terminal { terminal }) => terms.push((n.id.clone(), terminal.clone())),
             Some(Content::Mod { name, props }) => mods.push((n.id.clone(), Instance { name: name.clone(), props: props.clone() })),
+            Some(Content::Browser { url, .. }) => mods.push(self.browser_chrome_instance(&n.id, url)),
             _ => {}
         };
         let stacks = |root: &Node, mods: &mut Vec<(String, Instance)>| {
@@ -1269,6 +1296,10 @@ impl AppWindow {
                 if let Some(Content::Mod { name, props }) = n.content() {
                     out.insert(n.id.clone(), inst(name, props));
                 }
+                if let Some(Content::Browser { url, .. }) = n.content() {
+                    let (slot, instance) = self.browser_chrome_instance(&n.id, url);
+                    out.insert(slot, instance);
+                }
                 if let Some((name, props)) = &header
                     && n.is_pane()
                 {
@@ -1296,7 +1327,7 @@ impl AppWindow {
     /// tab) and overlays stay.
     fn drop_layout_copies(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let gone: Vec<_> = self.copies.keys().filter(|s| {
-            self.model.tab_of(s).is_none() && !self.overlays.iter().any(|o| o.slot == **s || o.layout.as_ref().is_some_and(|l| l.find(s).is_some()))
+            self.model.tab_of(s.strip_suffix("#browser").unwrap_or(s)).is_none() && !self.overlays.iter().any(|o| o.slot == **s || o.layout.as_ref().is_some_and(|l| l.find(s).is_some()))
         }).cloned().collect();
         for slot in gone {
             self.remove_copy(&slot, window, cx);
@@ -1391,6 +1422,7 @@ impl AppWindow {
     /// Creates what's visible, drops what isn't, publishes state, saves, focuses.
     fn sync(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.model.order_spaces();
+        self.discard_stale_browsers(window, cx);
         let (model, live) = (&self.model, &self.live);
         self.swapped.retain(|p, a| model.address_of(p).is_some() && live.contains_key(a));
         let (mut terms, mods_visible) = self.visible();
@@ -1657,6 +1689,10 @@ impl AppWindow {
     }
 
     fn pane_focus(&self, pane: &str, cx: &App) -> Option<FocusHandle> {
+        #[cfg(all(feature = "browser", target_os = "linux"))]
+        if let Some(browser) = self.browsers.get(pane) {
+            return Some(browser.view.read(cx).focus_handle(cx));
+        }
         self.pane_term(pane).map(|t| t.view.read(cx).focus_target(cx))
     }
 
@@ -1734,6 +1770,10 @@ impl AppWindow {
                 for p in ctx.root.panes() {
                     let focused = m.active.as_deref() == Some(pr.id.as_str()) && focused_pane.as_deref() == Some(p.id.as_str());
                     let zoomed = ctx.zoomed.as_deref() == Some(p.id.as_str());
+                    if let Some(Content::Browser { url, .. }) = p.content() {
+                        panes.push(json!({"pane":p.id,"terminal":null,"browser":true,"url":url,"tab":ctx.id,"title":url,"focused":focused,"zoomed":zoomed,"movable":self.pane_movable(&p.id)}));
+                        continue;
+                    }
                     // A mod pane: what it shows, no terminal.
                     if let Some(Content::Mod { name, .. }) = p.content() {
                         panes.push(json!({ "pane": p.id, "terminal": null, "mod": name, "tab": ctx.id, "title": name, "focused": focused, "zoomed": zoomed, "movable": self.pane_movable(&p.id) }));
@@ -1969,6 +2009,7 @@ impl AppWindow {
             slot.document = Some(document.clone());
             if replace {
                 let on = (!machine.is_empty()).then_some(machine.as_str());
+                self.discard_replaced_browsers(&document, on, window, cx);
                 document.replace(&mut self.model, on);
                 if first && let Some(view) = &self.initial_view { view.apply_machine(&mut self.model, on); }
                 changed = true;
@@ -3006,7 +3047,21 @@ impl AppWindow {
                     }
                 }
             }
+            // ---- browser panes (commands remain discoverable without the feature)
+            "browser.tab.new" | "browser.tab.select" | "browser.tab.close" | "browser.tab.move" | "browser.new" | "browser.navigate" | "browser.back" | "browser.forward" | "browser.reload" | "browser.stop" | "browser.focus_address" | "browser.copy" | "browser.cut" | "browser.paste" | "browser.address_context" | "browser.context_action" => {
+                let result = self.browser_command(name, a, window, cx);
+                self.answer(result);
+            }
             // ---- panes
+            "pane.menu" => {
+                let Some(pane) = Self::owned(a, "pane").or_else(|| self.model.focused_pane()) else { return self.fail("no pane for menu") };
+                if !self.model.tab_of(&pane).and_then(|t| t.root.find(&pane)).is_some_and(Node::is_pane) {
+                    return self.fail(format!("no pane {pane:?}"));
+                }
+                let mut target = json!({"pane":pane});
+                if let Some(terminal) = self.model.address_of(&pane) { target["terminal"] = json!(terminal); }
+                self.open_menu("pane", target, None, window, cx);
+            }
             "pane.split" => {
                 let axis = match Self::arg(a, "direction") {
                     Some("right") => Axis::Row,
@@ -3846,7 +3901,13 @@ impl AppWindow {
                     .iter()
                     .map(|c| {
                         let terms: Vec<Value> = c.root.terminals().iter().filter_map(|n| Some(terminal(&n.id, n.terminal()?))).collect();
-                        json!({ "id": c.id, "name": Model::tab_name(p, c), "active": Some(&c.id) == active.as_ref(), "settled": c.settled.is_some(), "terminals": terms })
+                        let panes: Vec<Value> = c.root.panes().iter().filter_map(|n| match n.content()? {
+                            Content::Browser { url, tabs } => Some(json!({ "pane": n.id, "browser": true, "url": url, "browser_tabs": tabs, "browser_state": crate::browser_chrome::state(&n.id) })),
+                            Content::Mod { name, props } => Some(json!({ "pane": n.id, "mod": name, "props": props })),
+                            Content::Terminal { terminal: address } => Some(terminal(&n.id, address)),
+                            _ => None,
+                        }).collect();
+                        json!({ "id": c.id, "name": Model::tab_name(p, c), "active": Some(&c.id) == active.as_ref(), "settled": c.settled.is_some(), "terminals": terms, "panes": panes })
                     })
                     .collect();
                 json!({ "id": p.id, "name": m.space_name(p, &home()), "folder": p.folder, "machine": p.machine, "active": m.active.as_deref() == Some(&p.id), "tabs": tabs })
@@ -4137,6 +4198,7 @@ impl AppWindow {
                 None => div().into_any_element(),
             },
             Content::Mod { .. } => self.render_slot(&n.id, cx),
+            Content::Browser { .. } => self.render_browser(&n.id, cx),
             Content::Agent { .. } => match self.shown_agent() {
                 Some(addr) => match self.agent_view(&n.id, &addr) {
                     Some(t) => div().size_full().child(shown_terminal(&t.view, cx)).into_any_element(),
@@ -4675,7 +4737,7 @@ fn swap_by(args: &Value) -> Result<SwapBy<'_>, String> {
 
 fn needs_model_pane(name: &str, args: &Value) -> bool {
     match name {
-        "pane.split" | "pane.close" | "pane.zoom" | "pane.swap" | "terminal.show" => AppWindow::arg(args, "pane").is_none(),
+        "pane.split" | "pane.close" | "pane.menu" | "pane.zoom" | "pane.swap" | "terminal.show" => AppWindow::arg(args, "pane").is_none(),
         "pane.go" => true,
         "terminal.open" | "terminal.keep" => matches!(AppWindow::arg(args, "place"), Some("right" | "down")),
         _ => false,
@@ -4880,6 +4942,7 @@ fn shadow(el: Div, s: Option<&str>) -> Div {
 
 impl Render for AppWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.prepare_browsers(window, cx);
         crate::bench::count(&crate::bench::WINDOW);
         let _timed = crate::bench::timed(&crate::bench::WINDOW_US);
         crate::bench::frame_start();
@@ -5615,6 +5678,46 @@ mod tests {
     }
 
     #[test]
+    fn mixed_split_browser_rejections_leave_existing_content_untouched() {
+        in_own_process("mixed_split_browser_rejections");
+    }
+
+    #[gpui::test]
+    fn mixed_split_browser_rejections(cx: &mut gpui::TestAppContext) {
+        use serde_json::json;
+        if !running_alone("mixed_split_browser_rejections") { return; }
+        let (view, cx) = open_window(cx, "fixture", "", json!({
+            "id": "root", "type": "row", "children": []
+        }));
+        view.update_in(cx, |this, window, cx| {
+            for remote in [false, true] {
+                // Local creation needs a real browser runtime, verified in the
+                // isolated acceptance harness; rejections never need a page/core.
+                if !remote && cfg!(all(feature = "browser", target_os = "linux")) { continue; }
+                for browser_source in [false, true] {
+                    this.model = super::Model::default();
+                    let content = if browser_source {
+                        super::Content::Browser { url: "https://source.invalid".into(), tabs: Default::default() }
+                    } else { super::Content::Terminal { terminal: "t1".into() } };
+                    this.model.add_space("s1", "Fixture", "/fixture", crate::model::Tab::with_pane(
+                        "tab1", "Fixture", super::Node::block("p1", content)));
+                    this.model.space_mut("s1").unwrap().machine = remote.then(|| "remote-fixture".into());
+                    let before = this.model.tab("tab1").unwrap().root.clone();
+                    for place in ["right", "down"] {
+                        let result = this.run_as("browser.new", json!({"place":place,"pane":"p1"}), false, window, cx);
+                        let error = result["error"].as_str().expect("creation must fail closed");
+                        if cfg!(all(feature = "browser", target_os = "linux")) {
+                            assert!(error.contains("Remote browser route unavailable") && error.contains("blocked"), "{error}");
+                        } else { assert!(error.contains("Browser unavailable"), "{error}"); }
+                        assert_eq!(this.model.tab("tab1").unwrap().root, before);
+                        assert_eq!(this.model.focused_pane().as_deref(), Some("p1"));
+                    }
+                }
+            }
+        });
+    }
+
+    #[test]
     fn layout_terminals_survive_stream_loss_until_confirmed_closed() {
         in_own_process("layout_terminal_stream_loss");
     }
@@ -5943,6 +6046,7 @@ export default class Probe extends View {
         }
     }
 
+    include!("window/browser_review_tests.rs");
     include!("window/pane_size_tests.rs");
     include!("window/drag_tests.rs");
 
@@ -6017,6 +6121,8 @@ export default class SystemToast extends View {
             "id": "root", "type": "row", "toast": "chosen", "terminal_menu": "chosen", "children": []
         });
         let (view, cx) = open_window(cx, "chosen", "", layout);
+        std::fs::write(crate::mods::app_dir().join("mods/chosen/mod.json"),
+            r#"{"place":"none","overlay":{"width":310,"height":120}}"#).unwrap();
         let check_handlers = |cx: &mut gpui::VisualTestContext| {
             view.update_in(cx, |this, window, cx| {
                 let id = crate::mods::new_overlay_id();
@@ -6028,6 +6134,17 @@ export default class SystemToast extends View {
                 this.open_menu("tab", json!({}), None, window, cx);
                 let id = this.overlays.last().unwrap().id.clone();
                 assert_eq!(this.copies[&format!("overlay:{id}")].inst.name, "chosen");
+                this.close_overlay(&id, window, cx);
+                // Browser Pane ⋯ uses this same path, without a terminal target.
+                this.open_menu("pane", json!({"pane":"browser-target"}), None, window, cx);
+                let overlay = this.overlays.last().unwrap();
+                assert_eq!(overlay.size.width, 310.0);
+                assert_eq!(overlay.size.height, 120.0);
+                let id = overlay.id.clone();
+                let inst = &this.copies[&format!("overlay:{id}")].inst;
+                assert_eq!(inst.name, "chosen");
+                assert_eq!(inst.props["tab"], "pane");
+                assert_eq!(inst.props["target"], json!({"pane":"browser-target"}));
                 this.close_overlay(&id, window, cx);
             });
         };
@@ -6060,6 +6177,40 @@ export default class SystemToast extends View {
         root.toast = Some("system-toast".into());
         let restored: super::Node = serde_json::from_value(serde_json::to_value(&root).unwrap()).unwrap();
         assert_eq!(restored.toast.as_deref(), Some("system-toast"));
+    }
+
+    #[test]
+    fn pane_menu_uses_normal_routing_without_browser_runtime() {
+        in_own_process("pane_menu_routing");
+    }
+
+    #[gpui::test]
+    fn pane_menu_routing(cx: &mut gpui::TestAppContext) {
+        use serde_json::json;
+        if !running_alone("pane_menu_routing") { return; }
+        let (view, cx) = open_window(cx, "personal-pane-menu", "import {View,div} from 'gpui-kit'; export default class extends View { render() { return div().child('Personal menu'); } }", json!({
+            "id":"root", "type":"row", "terminal_menu":"personal-pane-menu", "children":[]
+        }));
+        std::fs::write(crate::mods::mods_dir().join("personal-pane-menu/mod.json"), r#"{"place":"none","overlay":{"width":310,"height":120}}"#).unwrap();
+        cx.update(|window, cx| view.update(cx, |this, cx| {
+            this.model.add_space("s1", "blocked", "/fixture", super::Tab::with_pane("tab1", "Browser", super::Node::block("p1", super::Content::Browser { url: "https://example.com".into(), tabs: Default::default() })));
+            this.model.space_mut("s1").unwrap().machine = Some("remote".into());
+            let reply = this.run_as("pane.menu", json!({"pane":"p1"}), false, window, cx);
+            assert!(reply.get("error").is_none(), "{reply}");
+            let overlay = this.overlays.last().unwrap();
+            assert!(overlay.kind == super::OverlayKind::Popup);
+            assert_eq!(overlay.size, gpui::size(310.0, 120.0));
+            let copy = &this.copies[&overlay.slot];
+            assert_eq!(copy.inst.name, "personal-pane-menu");
+            assert_eq!(copy.inst.props["target"]["pane"], "p1");
+            assert!(copy.inst.props["target"].get("terminal").is_none());
+            this.chrome.terminal_menu = Some("missing-menu".into());
+            let reply = this.run_as("pane.menu", json!({"pane":"p1"}), false, window, cx);
+            assert!(reply.get("error").is_none(), "{reply}");
+            let overlay = this.overlays.last().unwrap();
+            assert_eq!(this.copies[&overlay.slot].inst.name, "menu");
+            assert_eq!(overlay.size, gpui::size(220.0, 260.0));
+        }));
     }
 
     #[test]
@@ -6167,11 +6318,11 @@ export default class SystemToast extends View {
     #[test]
     fn composition_commands_never_default_to_a_source_pane() {
         use serde_json::json;
-        for name in ["pane.split", "pane.close", "pane.zoom", "pane.go", "pane.swap", "terminal.show"] {
+        for name in ["pane.split", "pane.close", "pane.menu", "pane.zoom", "pane.go", "pane.swap", "terminal.show"] {
             assert!(super::needs_model_pane(name, &json!({})), "{name}");
             assert!(super::needs_model_pane(name, &json!({"pane": null})), "{name}");
         }
-        for name in ["pane.split", "pane.close", "pane.zoom", "pane.swap", "terminal.show"] {
+        for name in ["pane.split", "pane.close", "pane.menu", "pane.zoom", "pane.swap", "terminal.show"] {
             assert!(!super::needs_model_pane(name, &json!({"pane": "explicit-pane"})), "{name}");
         }
         assert!(super::needs_model_pane("pane.go", &json!({"pane": "explicit-pane"})));

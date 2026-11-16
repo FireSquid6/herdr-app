@@ -251,3 +251,26 @@ for (const sort of ["priority", "grouped"]) test(`${sort}: a kept sub-agent keep
   expect(pinned.texts.get("ag-t3")).toContain("t3");
   expect(keptRender(sort, { kept: [{ address: "t3", parent: "t9" }] }).ids).toContain("ag-t3"); // its parent ended
 });
+
+test("New menu opens a browser in the selected local space and blocks remote creation", async () => {
+  const menuSource = (await readFile(new URL("../defaults/mods/new-menu/main.js", import.meta.url), "utf8"))
+    .replace(/^import .*;\n/gm, "").replace("export default class NewMenu", "class NewMenu");
+  for (const machine of [null, "vps"]) {
+    const actions: unknown[] = [];
+    const globals = {
+      View: class {}, spaces: () => [{ id: "work", active: true, machine }],
+      theme: () => ({}), props: () => ({ overlay: "menu" }), keys: () => [], window: () => ({ platform: "linux" }), panes: () => [],
+      run: (...args: unknown[]) => actions.push(args), closeOverlay: () => {},
+      div: element, svg: element, image: element, h_flex: element, v_flex: element,
+    };
+    const NewMenu = new Function(...Object.keys(globals), `${menuSource}; return NewMenu;`)(...Object.values(globals));
+    const menu = new NewMenu();
+    menu.agents = [];
+    const tree = menu.render().node;
+    const find = (node: any): any => node?.id === "browser" ? node : (node?.children ?? []).map(find).find(Boolean);
+    const browser = find(tree);
+    expect(browser).toBeDefined();
+    browser.click();
+    expect(actions).toEqual(machine === null ? [["browser.new", { space: "work" }]] : []);
+  }
+});

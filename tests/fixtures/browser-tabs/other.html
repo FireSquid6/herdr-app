@@ -1,0 +1,10 @@
+<!doctype html><meta charset="utf-8"><title>Tab B fixture</title>
+<link rel="icon" href="/favicon.png" type="image/png">
+<h1>Tab B fixture</h1><label>Independent form <input id="draft" value="other"></label>
+<script>
+window.instance = crypto.randomUUID();
+function render() { document.title = `Tab B fixture · ${window.instance}:${document.querySelector('#draft').value}`; }
+document.querySelector('#draft').addEventListener('input', render);
+document.addEventListener('visibilitychange', render);
+render();
+</script>

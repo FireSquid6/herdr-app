@@ -231,6 +231,8 @@ pub(crate) const METHODS: &[(&str, &str, bool)] = &[
         false,
     ),
     ("set_selected_range", "(range: InputRange): void", false),
+    ("selected_range", "(): InputRange", true),
+    ("set_context_menu_enabled", "(enabled: boolean): void", false),
     ("replace", "(text: string): void", false),
 ];
 
@@ -268,6 +270,14 @@ macro_rules! state_binding {
                     entity.update(cx, |state, cx| {
                         state.replace_range_with_token(range, token, window, cx)
                     })?;
+                    Ok(Data::Null)
+                }
+                ("selected_range", []) => {
+                    let state = entity.read(cx);
+                    Ok(range_data(&state.value(), state.selected_range()))
+                }
+                ("set_context_menu_enabled", [Data::Boolean(enabled)]) => {
+                    entity.update(cx, |state, _| state.set_context_menu_enabled(*enabled));
                     Ok(Data::Null)
                 }
                 ("set_selected_range", [value]) => {

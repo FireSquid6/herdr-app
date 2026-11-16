@@ -17,6 +17,147 @@ Actions use the current selection unless you give an explicit target.
 Some actions close terminals; read their descriptions before running them.
 Mods can add their own actions, which are not listed here.
 
+## `browser.tab.new`
+
+Create and select a browser tab; defaults to the configured homepage.
+
+| Argument | Required |
+|---|---|
+| `pane` | no |
+| `url` | no |
+
+## `browser.tab.select`
+
+Select a browser tab without recreating its page.
+
+| Argument | Required |
+|---|---|
+| `pane` | no |
+| `tab` | yes |
+
+## `browser.tab.close`
+
+Close a browser tab (selected by default); the last closes its pane.
+
+| Argument | Required |
+|---|---|
+| `pane` | no |
+| `tab` | no |
+
+## `browser.tab.move`
+
+Move a browser tab to a zero-based index within its pane.
+
+| Argument | Required |
+|---|---|
+| `pane` | no |
+| `tab` | yes |
+| `index` | yes |
+
+## `browser.new`
+
+Open a browser pane (Linux browser feature only): place tab (default), right or down. URL defaults to browser_url; remote spaces are blocked.
+
+| Argument | Required |
+|---|---|
+| `url` | no |
+| `place` | no |
+| `space` | no |
+| `pane` | no |
+
+## `browser.navigate`
+
+Navigate a browser pane (default: focused) to a URL or search using browser_search.
+
+| Argument | Required |
+|---|---|
+| `url` | yes |
+| `pane` | no |
+
+## `browser.back`
+
+Go back in the browser pane's live session.
+
+| Argument | Required |
+|---|---|
+| `pane` | no |
+
+## `browser.forward`
+
+Go forward in the browser pane's live session.
+
+| Argument | Required |
+|---|---|
+| `pane` | no |
+
+## `browser.reload`
+
+Reload a browser pane.
+
+| Argument | Required |
+|---|---|
+| `pane` | no |
+
+## `browser.stop`
+
+Stop loading a browser pane.
+
+| Argument | Required |
+|---|---|
+| `pane` | no |
+
+## `browser.focus_address`
+
+Focus and select the browser pane's address field.
+
+| Argument | Required |
+|---|---|
+| `pane` | no |
+
+## `browser.copy`
+
+Copy text from the focused browser page or address editor; page requests complete asynchronously.
+
+| Argument | Required |
+|---|---|
+| `pane` | no |
+
+## `browser.cut`
+
+Cut text from the focused browser page or address editor; page requests complete asynchronously.
+
+| Argument | Required |
+|---|---|
+| `pane` | no |
+
+## `browser.paste`
+
+Paste text into the focused browser page or address editor; page requests acknowledge dispatch, not insertion.
+
+| Argument | Required |
+|---|---|
+| `pane` | no |
+
+## `browser.address_context`
+
+Open a trusted address menu bound to its native owner and focused editor.
+
+| Argument | Required |
+|---|---|
+| `pane` | no |
+| `owner` | yes |
+| `selection` | no |
+
+## `browser.context_action`
+
+Consume a one-shot trusted page context-menu action.
+
+| Argument | Required |
+|---|---|
+| `pane` | no |
+| `token` | yes |
+| `action` | yes |
+
 ## `space.new`
 
 Make a space: its name (default: none, so it's called after where its first terminal is), the folder its terminals start in (default: the focused terminal's), its first tab's name (default: none, so it's called by its number), optionally an agent (argv) and its first message (task), and the machine it lives on (`hc machine ls`; default the focused space's machine for keys and clicks, this computer for scripts; empty string: this computer; its terminals start in that machine's home unless folder).
@@ -109,6 +250,14 @@ Split a pane (default: the focused one) "right" or "down" with a new terminal, o
 | `argv` | no |
 | `mod` | no |
 | `props` | no |
+
+## `pane.menu`
+
+Open the layout-selected pane menu (default: focused pane), including browser and unavailable panes.
+
+| Argument | Required |
+|---|---|
+| `pane` | no |
 
 ## `pane.close`
 

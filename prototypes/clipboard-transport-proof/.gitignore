@@ -1,0 +1,11 @@
+# Runtime evidence belongs in the normal-user cache, never in the repository.
+/evidence-*/
+/legacy-evidence-*/
+/legacy-read-proof
+/clipboard-transport-proof
+/arguments-tests
+/build/
+/target/
+/__pycache__/
+*.pyc
+*.log

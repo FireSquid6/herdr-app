@@ -234,6 +234,20 @@ mod tests {
         m
     }
     #[test]
+    fn browser_documents_keep_only_last_url_and_owning_machine() {
+        let mut model = Model::default();
+        model.add_space("work", "", "", Tab::with_pane("tab", "Browser", Node::block("web", Content::Browser { url: "https://example.com/latest".into(), tabs: Default::default() })));
+        let doc = Document::capture(&model, None);
+        let saved = serde_json::to_value(&doc).unwrap();
+        assert_eq!(saved["spaces"][0]["tabs"][0]["root"]["children"][0]["content"], serde_json::json!({"url":"https://example.com/latest"}));
+        let restored: Document = serde_json::from_value(saved).unwrap();
+        let mut remote = Model::default();
+        restored.replace(&mut remote, Some("vps"));
+        assert_eq!(remote.space_of("vps/web").unwrap().machine.as_deref(), Some("vps"));
+        assert_eq!(remote.tab_of("vps/web").unwrap().root.find("vps/web").unwrap().content(), Some(&Content::Browser { url: "https://example.com/latest".into(), tabs: Default::default() }));
+    }
+
+    #[test]
     fn focus_zoom_and_settle_are_private() {
         let mut m = model();
         let before = Document::capture(&m, None);
@@ -355,5 +369,31 @@ mod tests {
     #[test]
     fn fresh_ids_are_not_a_per_screen_counter() {
         assert_ne!(Model::default().fresh_id("p"), Model::default().fresh_id("p"));
+    }
+}
+
+#[cfg(test)]
+mod browser_tab_tests {
+    use super::*;
+    #[test]
+    fn tabbed_browser_documents_preserve_layout_order_selection_and_profile_owner() {
+        let mut model = Model::default();
+        let mut tabs = crate::browser_tabs::BrowserTabs::default();
+        tabs.ensure("https://first.test");
+        tabs.insert("second".into(), "https://second.test".into());
+        tabs.move_to("second", 0);
+        let content = Content::Browser { url: tabs.url().unwrap().into(), tabs };
+        model.add_space("work", "Workspace", "/fixture", Tab::with_pane("tab", "Browser", Node::block("web", content.clone())));
+        model.split_with("web", crate::layout::Axis::Row, Node::block("neighbor", Content::Terminal { terminal: "t1".into() }));
+        let document = Document::capture(&model, None);
+        let restored: Document = serde_json::from_value(serde_json::to_value(document).unwrap()).unwrap();
+        let mut next = Model::default();
+        restored.replace(&mut next, Some("vps"));
+        let owner = next.space_of("vps/web").unwrap();
+        assert_eq!(owner.machine.as_deref(), Some("vps"));
+        assert_eq!(owner.id, "vps/work");
+        let root = &next.tab_of("vps/web").unwrap().root;
+        assert_eq!(root.find("vps/web").unwrap().content(), Some(&content));
+        assert!(root.find("vps/neighbor").is_some());
     }
 }
