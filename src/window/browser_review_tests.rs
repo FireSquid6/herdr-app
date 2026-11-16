@@ -157,6 +157,10 @@ fn browser_fallback_selection(cx: &mut TestAppContext) {
         });
     }
     view.update_in(cx, |this, window, cx| {
+        // Supply the synthetic document's mutation permission, not a real
+        // machine/connection. The browser has no terminal to kill, and this
+        // disconnected slot cannot schedule remote document writes.
+        this.documents.entry("remote".into()).or_default().available = true;
         let reply = this.run_as("pane.close", json!({}), false, window, cx);
         assert!(reply.get("error").is_none(), "{reply}");
         assert!(this.model.tab_of("page").is_none());
