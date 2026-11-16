@@ -1219,3 +1219,19 @@ fn browser_tab_strip_shrinks_to_minimum_before_native_scroll_overflow(cx: &mut T
     }
     cx.update(|window, _| window.remove_window());
 }
+
+#[gpui::test]
+fn trusted_address_selection_reports_utf16_without_native_context_menu(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let mut values = fixture(false, json!({"pane":"p1"}), updates("current", "current"));
+    values.insert("browserState".into(), json!({"pane":"p1","url":"a🦀z","available":true}));
+    staged.wrapper("mods/browser-chrome", r#"
+        this.input.set_context_menu_enabled(false);
+        this.input.set_selected_range({start:1,end:3});
+        const selection = this.input.selected_range();
+        if (selection.start !== 1 || selection.end !== 3) throw Error('wrong UTF-16 selection');
+    "#);
+    let tree = describe_with_values(cx, &staged, "", values, None).unwrap();
+    assert!(tree.contains("browser-address"), "{tree}");
+}

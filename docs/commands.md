@@ -114,6 +114,50 @@ Focus and select the browser pane's address field.
 |---|---|
 | `pane` | no |
 
+## `browser.copy`
+
+Copy the focused browser address selection (page clipboard temporarily unavailable).
+
+| Argument | Required |
+|---|---|
+| `pane` | no |
+
+## `browser.cut`
+
+Cut the focused browser address selection (page clipboard temporarily unavailable).
+
+| Argument | Required |
+|---|---|
+| `pane` | no |
+
+## `browser.paste`
+
+Paste into the focused browser address editor (page clipboard temporarily unavailable).
+
+| Argument | Required |
+|---|---|
+| `pane` | no |
+
+## `browser.address_context`
+
+Open a trusted address menu bound to its native owner and focused editor.
+
+| Argument | Required |
+|---|---|
+| `pane` | no |
+| `owner` | yes |
+| `selection` | no |
+
+## `browser.context_action`
+
+Consume a one-shot trusted page context-menu action.
+
+| Argument | Required |
+|---|---|
+| `pane` | no |
+| `token` | yes |
+| `action` | yes |
+
 ## `space.new`
 
 Make a space: its name (default: none, so it's called after where its first terminal is), the folder its terminals start in (default: the focused terminal's), its first tab's name (default: none, so it's called by its number), optionally an agent (argv) and its first message (task), and the machine it lives on (`hc machine ls`; default the focused space's machine for keys and clicks, this computer for scripts; empty string: this computer; its terminals start in that machine's home unless folder).

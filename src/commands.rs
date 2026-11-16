@@ -40,6 +40,11 @@ pub const COMMANDS: &[Command] = &[
     cmd("browser.reload", &[opt("pane")], "Reload a browser pane."),
     cmd("browser.stop", &[opt("pane")], "Stop loading a browser pane."),
     cmd("browser.focus_address", &[opt("pane")], "Focus and select the browser pane's address field."),
+    cmd("browser.copy", &[opt("pane")], "Copy the focused browser address selection (page clipboard temporarily unavailable)."),
+    cmd("browser.cut", &[opt("pane")], "Cut the focused browser address selection (page clipboard temporarily unavailable)."),
+    cmd("browser.paste", &[opt("pane")], "Paste into the focused browser address editor (page clipboard temporarily unavailable)."),
+    cmd("browser.address_context", &[opt("pane"), req("owner"), opt("selection")], "Open a trusted address menu bound to its native owner and focused editor."),
+    cmd("browser.context_action", &[opt("pane"), req("token"), req("action")], "Consume a one-shot trusted page context-menu action."),
     // What exists.
     cmd("space.new", &[opt("name"), opt("folder"), opt("tab"), opt("argv"), opt("task"), opt("machine")],
         "Make a space: its name (default: none, so it's called after where its first terminal is), the folder its terminals start in (default: the focused terminal's), its first tab's name (default: none, so it's called by its number), optionally an agent (argv) and its first message (task), and the machine it lives on (`hc machine ls`; default the focused space's machine for keys and clicks, this computer for scripts; empty string: this computer; its terminals start in that machine's home unless folder)."),

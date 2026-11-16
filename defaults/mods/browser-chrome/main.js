@@ -9,6 +9,7 @@ export default class BrowserChrome extends View {
   init(_props, cx) {
     const state = (props()?.pane ? browserState(props().pane) : null);
     this.input = InputState.new({ value: state?.url ?? "", placeholder: "Search or enter address" });
+    this.input.set_context_menu_enabled(state?.available === false);
     this.input.on("submit", () => run("browser.navigate", { pane: props().pane, url: this.input.value() }));
     this.pressedTab = null;
     this.tabViewportWidth = 0;
@@ -38,6 +39,46 @@ export default class BrowserChrome extends View {
       .when(enabled, el => el.cursor_pointer().hover(s => s.bg(t.hover).text_color(t.foreground)).on_click(action))
       .child(icon === "plus" ? "+" : svg(icon === "refresh" ? "frame/settings/refresh.svg" : `mods/workspace-chrome/${icon}.svg`).size(15));
   }
+  contextMenu(s) {
+    const menu = s.context;
+    if (!menu) return null;
+    const address = menu.source === "address";
+    const item = (id, label, action) => div().id(`browser-context-${id}`).px(12).py(7).cursor_pointer()
+      .hover(el => el.bg(theme().hover))
+      .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+      .on_click(() => {
+        // Keep the exact UTF-16 selection the address menu was opened for.
+        // Do not restore a stale range into text edited while the menu was up.
+        if (address && action !== "dismiss") {
+          const range = this.input.selected_range();
+          const snapshot = this.addressMenu;
+          if (!snapshot || snapshot.owner !== s.owner || snapshot.value !== this.input.value()
+              || snapshot.start !== range.start || snapshot.end !== range.end) action = "dismiss";
+        }
+        run("browser.context_action", { pane: s.pane, token: menu.token, action });
+      }).child(label);
+    const rows = [];
+    if (!address && menu.link) {
+      rows.push(item("open-link", "Open link", "open_link"));
+      if (s.can_open_link_in_tab) rows.push(item("open-link-new-tab", "Open link in new browser tab", "open_link_new_tab"));
+      rows.push(item("copy-link", "Copy link address", "copy_link"));
+    }
+    const editingAllowed = address || s.clipboard_available === true;
+    if (editingAllowed && menu.can_copy) rows.push(item("copy", "Copy", "copy"));
+    if (editingAllowed && menu.editable && menu.can_cut) rows.push(item("cut", "Cut", "cut"));
+    if (editingAllowed && menu.editable && menu.can_paste) rows.push(item("paste", "Paste", "paste"));
+    if (!editingAllowed) rows.push(div().id("browser-context-clipboard-unavailable").px(12).py(7).text_color(theme().muted).child("Page clipboard unavailable"));
+    rows.push(item("select-all", "Select all", "select_all"));
+    if (!address) {
+      if (s.can_back) rows.push(item("back", "Back", "back"));
+      if (s.can_forward) rows.push(item("forward", "Forward", "forward"));
+      rows.push(item("reload", "Reload", "reload"));
+    }
+    return v_flex().id("browser-context-menu").absolute().top(address ? 42 : 80).right(8).w(240)
+      .bg(theme().chrome).border_1().border_color(theme().border).rounded(8).py(4)
+      .on_mouse_down_out(() => run("browser.context_action", { pane: s.pane, token: menu.token, action: "dismiss" }))
+      .children(rows);
+  }
   render() {
     const t = theme();
     const s = (props()?.pane ? browserState(props().pane) : null);
@@ -50,7 +91,7 @@ export default class BrowserChrome extends View {
     // rather than expecting shrink on that intrinsic-width content row.
     const gaps = Math.max(0, count - 1) * 3;
     const tabWidth = count ? Math.max(90, Math.min(180, ((this.tabViewportWidth || count * 180 + gaps) - gaps) / count)) : 180;
-    return v_flex().id("browser-chrome").size_full().min_h(0).bg(t.background).text_color(t.foreground)
+    return v_flex().id("browser-chrome").relative().size_full().min_h(0).bg(t.background).text_color(t.foreground)
       .child(h_flex().id("browser-tab-strip").flex_none().min_w(0).h(34).items_center().gap(3).bg(t.chrome)
         .on_mouse_up("left", () => { this.pressedTab = null; })
         .child(div().id("browser-tab-viewport").flex_1().min_w(0).h_full().overflow_hidden()
@@ -82,7 +123,14 @@ export default class BrowserChrome extends View {
         .child(this.button("browser-back", "chevron-left", "Back", allowed && s.can_back, action("back")))
         .child(this.button("browser-forward", "chevron-right", "Forward", allowed && s.can_forward, action("forward")))
         .child(this.button("browser-reload-stop", s.loading ? "x" : "refresh", s.loading ? "Stop" : "Reload", allowed, action(s.loading ? "stop" : "reload")))
-        .child(Input.new(this.input).id("browser-address").flex_1().min_w(0).h(30).px(10).rounded(8)
+        .child(Input.new(this.input).id("browser-address")
+          .when(allowed, el => el.on_mouse_down("right", (_e, cx) => {
+            cx.stop_propagation();
+            this.input.focus();
+            const range = this.input.selected_range();
+            this.addressMenu = { owner: s.owner, value: this.input.value(), ...range };
+            run("browser.address_context", { pane: s.pane, owner: s.owner, selection: range.start !== range.end });
+          })).flex_1().min_w(0).h(30).px(10).rounded(8)
           .border_1().border_color(this.editing ? t.accent : t.border).bg(t.input).text_color(t.foreground).text_size(13))
         .child(this.button("browser-pane-menu", "layers", "Pane menu", true,
           () => run("pane.menu", { pane: s.pane })))
@@ -90,6 +138,7 @@ export default class BrowserChrome extends View {
       .child(div().flex_none().px(10).py(4).text_size(11).text_color(t.dim)
         .child(`Workspace: ${s.workspace} · ${s.remote ? "Remote route blocked" : "Local networking · localhost is this computer"}`))
       .when(Boolean(s.error), el => el.child(div().p(12).text_size(13).child(s.error)))
-      .child(div().flex_1().min_h(0).overflow_hidden().child(BrowserPage(s.pane)));
+      .child(div().flex_1().min_h(0).overflow_hidden().child(BrowserPage(s.pane)))
+      .when(Boolean(s.context), el => el.child(this.contextMenu(s)));
   }
 }

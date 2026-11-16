@@ -370,3 +370,30 @@ fn browser_selected_owner_before_render(cx: &mut TestAppContext) {
         native.update(cx, |native, cx|native.close(window, cx));
     });
 }
+
+#[cfg(not(all(feature = "browser", target_os = "linux")))]
+#[test]
+fn browser_menu_and_edit_commands_fail_closed_without_native_feature() {
+    in_own_process("browser_context_default_off");
+}
+
+#[cfg(not(all(feature = "browser", target_os = "linux")))]
+#[gpui::test]
+fn browser_context_default_off(cx: &mut TestAppContext) {
+    if !running_alone("browser_context_default_off") { return; }
+    let (view, cx) = review_browser_window(cx);
+    view.update_in(cx, |this, window, cx| {
+        for name in ["browser.copy", "browser.cut", "browser.paste", "browser.address_context", "browser.context_action"] {
+            let args = match name {
+                "browser.address_context" => json!({"pane":"page", "owner":"7"}),
+                "browser.context_action" => json!({"pane":"page", "token":"1", "action":"open_link_new_tab"}),
+                _ => json!({"pane":"page"}),
+            };
+            let reply = this.run_as(name, args, false, window, cx);
+            assert!(reply["error"].as_str().unwrap().contains("Browser unavailable"), "{name}: {reply}");
+        }
+        let state = crate::browser_chrome::state("page");
+        assert_eq!(state["available"], false);
+        assert!(state["context"].is_null());
+    });
+}

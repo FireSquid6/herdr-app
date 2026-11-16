@@ -99,7 +99,20 @@ editor styling, and surrounding layout. Clone the shipped mod with `mod.clone`,
 edit the personal copy, and select its name in settings.json; it hot reloads.
 Its props contain `pane`; `browserState(pane)` is inert data and `BrowserPage`
 from `herdr-browser` composes the native page. Never execute page metadata as
-mod code or command arguments. See the installed AGENTS.md/API declarations.
+mod code or command names. See the installed AGENTS.md/API declarations.
+`browser.copy`, `browser.cut` and `browser.paste` take optional `pane` and route
+to its focused address editor. Native page clipboard exchange currently fails
+closed (`clipboard_available: false`) pending native bridge integration and
+isolated runtime acceptance. No IME/selection-mirror fallback is enabled; link
+address copying and ordinary address-editor actions are separate. Trusted chrome
+owns page/address context menus with host-issued one-shot tokens:
+`browser.address_context {pane?, owner, selection?}` acquires an address token;
+`browser.context_action {pane?, token, action}` consumes a page/address action.
+`browserState(pane).context` strings are untrusted data, never code. Website
+permission prompts remain denied. `open_link_new_tab` consumes the validated
+native link capability and uses `browser.tab.new` in the same pane. Never test
+clipboard/input on the real desktop; unit/menu tests do not prove page clipboard
+or a Wayland clipboard round trip.
 Normal pane split/focus/zoom/close works. `pane.menu {pane?}` opens the
 layout-selected pane menu (also on blocked/unavailable pages), preserving its
 custom dimensions and missing-mod fallback.

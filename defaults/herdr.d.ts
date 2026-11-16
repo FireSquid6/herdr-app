@@ -436,5 +436,15 @@ export interface BrowserState {
   pane: string; workspace: string; url: string;
   loading: boolean; can_back: boolean; can_forward: boolean;
   remote: boolean; closed: boolean; available: boolean; error: string | null;
+  /** Native browser identity for queuing an address-menu request. Not a pane ID. */
+  owner?: string | null;
+  can_open_link_in_tab?: boolean;
+  /** False while native page clipboard isolation acceptance is unresolved. Address editing is separate. */
+  clipboard_available?: boolean;
+  /** Plain untrusted page data. Only the host-issued token authorizes actions. */
+  context?: {
+    source: "page" | "address"; token: string; link: string; selection: string;
+    editable: boolean; can_copy: boolean; can_cut: boolean; can_paste: boolean;
+  } | null;
 }
 export function browserState(pane: string): BrowserState | null;

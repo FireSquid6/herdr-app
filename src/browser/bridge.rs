@@ -3,7 +3,7 @@ use cef::{rc::Rc as _, *};
 
 use std::sync::{
     Arc, Mutex,
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
 };
 
 #[derive(Clone, Default, PartialEq, Eq)]
@@ -29,6 +29,18 @@ pub struct Callbacks {
     pub status: Mutex<LoadStatus>,
     pub hidden: AtomicBool,
     pub paint_seen: AtomicBool,
+    pub editing_active: AtomicBool,
+    pub page_context: Mutex<Option<super::context_menu::PageContext>>,
+    pub editing_generation: AtomicU64,
+}
+
+impl Callbacks {
+    /// Revoke before hiding, navigating, closing or replacing the native owner.
+    pub fn invalidate_editing(&self) {
+        self.editing_active.store(false, Ordering::Release);
+        self.editing_generation.fetch_add(1, Ordering::AcqRel);
+        if let Ok(mut menu) = self.page_context.lock() { menu.take(); }
+    }
 }
 
 wrap_render_handler! {
@@ -71,6 +83,7 @@ wrap_life_span_handler! {
 
         fn on_before_close(&self, _browser: Option<&mut Browser>) {
             tracing::info!("CEF page on_before_close");
+            self.shared.invalidate_editing();
             self.shared.closed.store(true, Ordering::Release);
         }
     }
@@ -249,19 +262,59 @@ wrap_resource_request_handler! {
     }
 }
 wrap_request_handler! {
-    pub struct Requests {}
+    pub struct Requests { shared: Arc<Callbacks> }
     impl RequestHandler {
         fn on_before_browse(&self, _browser: Option<&mut Browser>, _frame: Option<&mut Frame>, request: Option<&mut Request>, _gesture: i32, _redirect: i32) -> i32 {
             let url = request.map(|r| CefString::from(&r.url()).to_string()).unwrap_or_default();
             let allowed = super::policy::allowed_navigation(&url);
+            if allowed { self.shared.invalidate_editing(); }
             tracing::info!(allowed, origin = %super::policy::diagnostic_origin(&url), "CEF before-browse policy");
             i32::from(!allowed)
         }
         fn resource_request_handler(&self, _browser: Option<&mut Browser>, _frame: Option<&mut Frame>, _request: Option<&mut Request>, _navigation: i32, _download: i32, _initiator: Option<&CefString>, _disable: Option<&mut i32>) -> Option<ResourceRequestHandler> { Some(Resources::new()) }
     }
 }
+// Both full context menus and Chromium's small selection/quick menu are
+// suppressed. Only trusted chrome can render actions from this plain snapshot.
+wrap_context_menu_handler! {
+    pub struct ContextMenus { shared: Arc<Callbacks> }
+    impl ContextMenuHandler {
+        fn on_before_context_menu(&self, browser: Option<&mut Browser>, frame: Option<&mut Frame>, params: Option<&mut ContextMenuParams>, model: Option<&mut MenuModel>) {
+            if let Some(model) = model { model.clear(); }
+            if !self.shared.editing_active.load(Ordering::Acquire) || self.shared.hidden.load(Ordering::Acquire)
+                || self.shared.closed.load(Ordering::Acquire) || self.shared.closing.load(Ordering::Acquire) { return; }
+            let (Some(browser), Some(frame), Some(params)) = (browser, frame, params) else { return; };
+            let link = CefString::from(&params.link_url()).to_string();
+            let selection = CefString::from(&params.selection_text()).to_string();
+            let flags = params.edit_state_flags().as_ref().0;
+            if let Ok(mut context) = self.shared.page_context.lock() {
+                *context = super::context_menu::PageContext::snapshot(
+                    super::context_menu::identity(browser, frame),
+                    self.shared.editing_generation.load(Ordering::Acquire),
+                    link, selection, params.is_editable() == 1, flags,
+                );
+            }
+        }
+        fn run_context_menu(&self, _browser: Option<&mut Browser>, _frame: Option<&mut Frame>, _params: Option<&mut ContextMenuParams>, _model: Option<&mut MenuModel>, callback: Option<&mut RunContextMenuCallback>) -> i32 {
+            if let Some(callback) = callback { callback.cancel(); }
+            1
+        }
+        fn run_quick_menu(&self, _browser: Option<&mut Browser>, _frame: Option<&mut Frame>, _location: Option<&Point>, _size: Option<&Size>, _flags: QuickMenuEditStateFlags, callback: Option<&mut RunQuickMenuCallback>) -> i32 {
+            if let Some(callback) = callback { callback.cancel(); }
+            1
+        }
+    }
+}
+wrap_frame_handler! {
+    pub struct Frames { shared: Arc<Callbacks> }
+    impl FrameHandler {
+        fn on_frame_detached(&self, _browser: Option<&mut Browser>, _frame: Option<&mut Frame>) { self.shared.invalidate_editing(); }
+        fn on_frame_destroyed(&self, _browser: Option<&mut Browser>, _frame: Option<&mut Frame>) { self.shared.invalidate_editing(); }
+        fn on_main_frame_changed(&self, _browser: Option<&mut Browser>, _old: Option<&mut Frame>, _new: Option<&mut Frame>) { self.shared.invalidate_editing(); }
+    }
+}
 wrap_client! {
-    pub struct PageClient { display: DisplayHandler, pixels: RenderHandler, lifetime: LifeSpanHandler, navigation: LoadHandler, permissions: PermissionHandler, dialogs: DialogHandler, downloads: DownloadHandler, requests: RequestHandler }
+    pub struct PageClient { display: DisplayHandler, pixels: RenderHandler, lifetime: LifeSpanHandler, navigation: LoadHandler, permissions: PermissionHandler, dialogs: DialogHandler, downloads: DownloadHandler, requests: RequestHandler, menus: ContextMenuHandler, frames: FrameHandler }
     impl Client {
         fn display_handler(&self) -> Option<DisplayHandler> { Some(self.display.clone()) }
         fn render_handler(&self) -> Option<RenderHandler> { Some(self.pixels.clone()) }
@@ -271,6 +324,8 @@ wrap_client! {
         fn download_handler(&self) -> Option<DownloadHandler> { Some(self.downloads.clone()) }
         fn request_handler(&self) -> Option<RequestHandler> { Some(self.requests.clone()) }
         fn permission_handler(&self) -> Option<PermissionHandler> { Some(self.permissions.clone()) }
+        fn frame_handler(&self) -> Option<FrameHandler> { Some(self.frames.clone()) }
+        fn context_menu_handler(&self) -> Option<ContextMenuHandler> { Some(self.menus.clone()) }
     }
 }
 // CEF 156 include/cef_request_context_handler.h: this UI-thread callback,
@@ -317,11 +372,13 @@ pub fn create(shared: Arc<Callbacks>, url: &str, context: &mut RequestContext) -
         Display::new(shared.clone()),
         Pixels::new(shared.clone()),
         Lifetime::new(shared.clone()),
-        Navigation::new(shared),
+        Navigation::new(shared.clone()),
         Permissions::new(),
         Dialogs::new(),
         Downloads::new(),
-        Requests::new(),
+        Requests::new(shared.clone()),
+        ContextMenus::new(shared.clone()),
+        Frames::new(shared),
     );
     let info = WindowInfo::default().set_as_windowless(0);
     let settings = BrowserSettings {
@@ -380,5 +437,86 @@ mod tab_visibility_tests {
         shared.mailbox.close();
         pixels.on_paint(None, PaintElementType::VIEW, None, bytes.as_ptr().cast(), 2, 2);
         assert_eq!(shared.mailbox.counts().0, 1);
+    }
+}
+
+#[cfg(test)]
+mod context_menu_tests {
+    use super::*;
+    #[test]
+    fn owner_invalidation_retires_queued_native_metadata_and_generation() {
+        let shared = Callbacks::default();
+        shared.editing_active.store(true, Ordering::Release);
+        *shared.page_context.lock().unwrap() = Some(super::super::context_menu::PageContext {
+            owner: super::super::context_menu::Identity {browser: 7, frame: "a".into()},
+            generation: 0, token: 1, link: "https://safe.test".into(), selection: String::new(),
+            editable: false, can_copy: false, can_cut: false, can_paste: false,
+        });
+        shared.invalidate_editing();
+        assert!(!shared.editing_active.load(Ordering::Acquire));
+        assert_eq!(shared.editing_generation.load(Ordering::Acquire), 1);
+        assert!(shared.page_context.lock().unwrap().is_none());
+    }
+    #[test]
+    fn native_close_invalidates_menus_immediately_not_at_next_render() {
+        let shared = Arc::new(Callbacks::default());
+        shared.editing_active.store(true, Ordering::Release);
+        Lifetime::new(shared.clone()).on_before_close(None);
+        assert!(shared.closed.load(Ordering::Acquire));
+        assert!(!shared.editing_active.load(Ordering::Acquire));
+        assert_eq!(shared.editing_generation.load(Ordering::Acquire), 1);
+    }
+}
+
+#[cfg(test)]
+mod native_menu_suppression_tests {
+    use super::*;
+    use cef::rc::{ConvertReturnValue, RcImpl};
+    use cef::sys::{_cef_run_context_menu_callback_t as Full, _cef_run_quick_menu_callback_t as Quick};
+    extern "C" fn cancel_full(raw: *mut Full) {
+        RcImpl::<Full, Arc<AtomicBool>>::get(raw).interface.store(true, Ordering::Release);
+    }
+    extern "C" fn cancel_quick(raw: *mut Quick) {
+        RcImpl::<Quick, Arc<AtomicBool>>::get(raw).interface.store(true, Ordering::Release);
+    }
+    fn full_callback(cancelled: Arc<AtomicBool>) -> RunContextMenuCallback {
+        // SAFETY: this C callback struct contains only scalar fields and nullable
+        // function pointers. RcImpl installs valid refcount callbacks before use.
+        let mut raw: Full = unsafe { std::mem::zeroed() };
+        raw.cancel = Some(cancel_full);
+        let raw = RcImpl::new(raw, cancelled);
+        (raw.cast::<Full>()).wrap_result()
+    }
+    fn quick_callback(cancelled: Arc<AtomicBool>) -> RunQuickMenuCallback {
+        // SAFETY: same scalar/nullable C layout and RcImpl ownership as above.
+        let mut raw: Quick = unsafe { std::mem::zeroed() };
+        raw.cancel = Some(cancel_quick);
+        let raw = RcImpl::new(raw, cancelled);
+        (raw.cast::<Quick>()).wrap_result()
+    }
+    #[test]
+    fn native_full_and_quick_menus_are_handled_and_cancelled_even_without_owner() {
+        let menus = ContextMenus::new(Arc::new(Callbacks::default()));
+        let full = Arc::new(AtomicBool::new(false));
+        let quick = Arc::new(AtomicBool::new(false));
+        assert_eq!(menus.run_context_menu(None, None, None, None, Some(&mut full_callback(full.clone()))), 1);
+        assert_eq!(menus.run_quick_menu(None, None, None, None, QuickMenuEditStateFlags::default(), Some(&mut quick_callback(quick.clone()))), 1);
+        assert!(full.load(Ordering::Acquire));
+        assert!(quick.load(Ordering::Acquire));
+    }
+    #[test]
+    fn frame_replacement_detach_and_destruction_revoke_before_next_tick() {
+        let shared = Arc::new(Callbacks::default());
+        let frames = Frames::new(shared.clone());
+        for action in 0..3 {
+            shared.editing_active.store(true, Ordering::Release);
+            match action {
+                0 => frames.on_main_frame_changed(None, None, None),
+                1 => frames.on_frame_detached(None, None),
+                _ => frames.on_frame_destroyed(None, None),
+            }
+            assert!(!shared.editing_active.load(Ordering::Acquire));
+            assert_eq!(shared.editing_generation.load(Ordering::Acquire), action + 1);
+        }
     }
 }

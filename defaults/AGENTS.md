@@ -651,6 +651,28 @@ The main ones:
   pane IDs, last URLs, durable `browser_tabs` and live `browser_state`; the existing `terminals` array remains available. Bind these in `keys.json` or invoke from a personal mod;
   no browser shortcuts are imposed. Explicit global/layout keys take precedence
   while a browser or its address field has focus; unbound editing keys stay there.
+  `browser.copy {pane?}`, `browser.cut {pane?}` and `browser.paste {pane?}`
+  operate on the focused address editor. Page clipboard is temporarily unavailable
+  (`browserState(pane).clipboard_available` is false), pending native bridge
+  integration and isolated runtime acceptance. No IME/selection-mirror fallback
+  is enabled. Link-address copying is separate from page clipboard exchange.
+  Context menus are trusted `browser_chrome` mod UI: clone the mod to customize
+  link/selection/editable/address menus. No Chromium full/quick menu is shown.
+  `browserState(pane).context` contains plain untrusted strings and a one-shot
+  token; call `browser.context_action {pane?, token, action}` for `copy`, `cut`,
+  `paste`, `copy_link`, `open_link`, `back`, `forward`, `reload`, `select_all` or
+  `dismiss`. Never derive command names from website data. Address right-click
+  calls `browser.address_context {pane?, owner, selection?}` with the current
+  native `browserState(pane).owner` and editor selection state; it acquires an
+  editor-focus-bound token rather than reusing a page menu. Trusted input state
+  has `selected_range()` (UTF-16) and `set_context_menu_enabled(false)` so a mod
+  can replace its built-in menu. Editable menu rendering never probes the OS
+  clipboard. No website-to-Herdr/core/debug bridge is exposed. Menu capabilities
+  cancel on focus/owner/navigation changes, hide or close, even if a pane/frame
+  ID is reused. `open_link_new_tab` consumes the link capability, then invokes
+  `browser.tab.new` in the same pane; it never opens a Herdr workspace tab.
+  Address menus retain the exact editor focus and UTF-16 selection; a changed
+  address value/selection dismisses the menu rather than editing a stale range.
   Browser panes use normal pane focus, split, swap, zoom and close, and cannot
   move across spaces. Remote creation fails closed; restored remote panes show
   a blocked placeholder, never direct local networking. SSH browser routing is

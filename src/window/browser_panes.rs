@@ -297,6 +297,9 @@ impl AppWindow {
                 return Ok(json!({"pane":pane}));
             }
             let pane = Self::owned(args, "pane").or_else(|| self.model.focused_pane()).ok_or("no browser pane focused")?;
+            if matches!(name, "browser.copy" | "browser.cut" | "browser.paste" | "browser.address_context" | "browser.context_action") && self.model.focused_pane().as_deref() != Some(pane.as_str()) {
+                return Err("Clipboard/menu owner is no longer the focused pane".into());
+            }
             let space = self.model.space_of(&pane).ok_or("no such browser pane")?;
             if space.machine.is_some() { return Err("Remote browser route unavailable: direct networking is blocked".into()); }
             // sync() alone does not render. Queued select/new + page actions
@@ -317,6 +320,26 @@ impl AppWindow {
                 return Ok(json!({"pane":pane}));
             }
             let slot = self.browsers.get(&pane).ok_or("browser has not been shown yet; show its tab first")?;
+            if matches!(name, "browser.copy" | "browser.cut" | "browser.paste") {
+                slot.view.update(cx, |view, cx| view.edit(name.trim_start_matches("browser."), window, cx))?;
+                return Ok(json!({"pane":pane}));
+            }
+            if name == "browser.address_context" {
+                let owner = Self::arg(args, "owner").ok_or("browser.address_context requires owner")?;
+                let selection = args.get("selection").and_then(Value::as_bool).unwrap_or(false);
+                slot.view.update(cx, |view, cx| view.address_context(owner, selection, window, cx))?;
+                return Ok(json!({"pane":pane}));
+            }
+            if name == "browser.context_action" {
+                let token = Self::arg(args, "token").ok_or("browser.context_action requires token")?;
+                let action = Self::arg(args, "action").ok_or("browser.context_action requires action")?;
+                if action == "open_link_new_tab" {
+                    let url = slot.view.update(cx, |view, cx| view.take_context_link(token, window, cx))?;
+                    return self.browser_tab_command("browser.tab.new", &json!({"pane":pane,"url":url}), window, cx);
+                }
+                slot.view.update(cx, |view, cx| view.context_action(token, action, window, cx))?;
+                return Ok(json!({"pane":pane}));
+            }
             slot.view.update(cx, |view, cx| match name {
                 "browser.back" => view.back(window, cx),
                 "browser.forward" => view.forward(window, cx),

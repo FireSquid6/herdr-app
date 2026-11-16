@@ -3048,7 +3048,7 @@ impl AppWindow {
                 }
             }
             // ---- browser panes (commands remain discoverable without the feature)
-            "browser.tab.new" | "browser.tab.select" | "browser.tab.close" | "browser.tab.move" | "browser.new" | "browser.navigate" | "browser.back" | "browser.forward" | "browser.reload" | "browser.stop" | "browser.focus_address" => {
+            "browser.tab.new" | "browser.tab.select" | "browser.tab.close" | "browser.tab.move" | "browser.new" | "browser.navigate" | "browser.back" | "browser.forward" | "browser.reload" | "browser.stop" | "browser.focus_address" | "browser.copy" | "browser.cut" | "browser.paste" | "browser.address_context" | "browser.context_action" => {
                 let result = self.browser_command(name, a, window, cx);
                 self.answer(result);
             }

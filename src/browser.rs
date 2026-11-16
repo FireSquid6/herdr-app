@@ -2,6 +2,7 @@
 //! this module is not a claim of a completed runtime sandbox/performance audit.
 mod arguments;
 mod bridge;
+mod context_menu;
 mod favicon;
 mod pane;
 mod policy;

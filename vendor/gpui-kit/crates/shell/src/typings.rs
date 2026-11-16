@@ -3070,6 +3070,10 @@ const BASE: &str = r#"  /** A row. */
     replace_with_token(token: InlineToken): void;
     replace_range_with_token(range: InputRange, token: InlineToken): void;
     set_selected_range(range: InputRange): void;
+    /** The active selection, in UTF-16 offsets. */
+    selected_range(): InputRange;
+    /** Disable the built-in right-click menu when trusted mod UI supplies one. */
+    set_context_menu_enabled(enabled: boolean): void;
     replace(text: string): void;
     value(): string;
     /** Plain text, or a content snapshot to restore its tokens as well. */
@@ -3139,6 +3143,10 @@ const BASE: &str = r#"  /** A row. */
     replace_with_token(token: InlineToken): void;
     replace_range_with_token(range: InputRange, token: InlineToken): void;
     set_selected_range(range: InputRange): void;
+    /** The active selection, in UTF-16 offsets. */
+    selected_range(): InputRange;
+    /** Disable the built-in right-click menu when trusted mod UI supplies one. */
+    set_context_menu_enabled(enabled: boolean): void;
     replace(text: string): void;
     value(): string;
     /** Plain text, or a content snapshot to restore its tokens as well. */
