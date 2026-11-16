@@ -48,6 +48,7 @@ pub const COMMANDS: &[Command] = &[
     cmd("tab.rename", &[opt("id"), opt("name")], "Rename a tab (asks the person when no name; an empty name: called by its number again)."),
     cmd("tab.move", &[req("id"), req("index")], "Move a tab to a position in its space (1 = first)."),
     cmd("pane.split", &[req("direction"), opt("pane"), opt("argv"), opt("mod"), opt("props")], "Split a pane (default: the focused one) \"right\" or \"down\" with a new terminal, or with a mod (`mod`, its `props`) beside it."),
+    cmd("pane.menu", &[opt("pane")], "Open the layout-selected pane menu (default: focused pane), including browser and unavailable panes."),
     cmd("pane.close", &[opt("pane")], "Close a pane and end its terminal."),
     cmd("terminal.open", &[opt("argv"), opt("folder"), opt("place"), opt("name")], "Start a terminal: as a new tab (place \"tab\", default), or \"right\"/\"down\" of the focused pane."),
     cmd("terminal.keep", &[req("terminal"), opt("place")], "Give a running terminal without a pane (a sub-agent) a pane: a new tab, or \"right\"/\"down\"."),
@@ -216,7 +217,7 @@ mod tests {
 
     #[test]
     fn malformed_targets_cannot_fall_back_to_the_current_work() {
-        for (name, arg) in [("tab.close", "id"), ("pane.close", "pane"), ("space.close", "id"), ("tab.new", "space"), ("terminal.show", "terminal"), ("pane.swap", "pane"), ("pane.swap", "target")] {
+        for (name, arg) in [("tab.close", "id"), ("pane.close", "pane"), ("pane.menu", "pane"), ("space.close", "id"), ("tab.new", "space"), ("terminal.show", "terminal"), ("pane.swap", "pane"), ("pane.swap", "target")] {
             let c = find(name).unwrap();
             for value in [json!(123), json!(false), json!([]), json!({"id": "target"})] {
                 let error = validate_args(c, &json!({arg: value})).unwrap_err();

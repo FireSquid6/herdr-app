@@ -398,6 +398,8 @@ pub struct Person {
     pub browser_url: String,
     /// HTTP(S) search URL template; {query} is percent-encoded.
     pub browser_search: String,
+    /// Global trusted mod used around every browser page.
+    pub browser_chrome: String,
     /// Minimum terminal text contrast ratio; 1 leaves program colors unchanged.
     pub minimum_contrast: f32,
     /// macOS Option sends Alt shortcuts, or follows the keyboard layout.
@@ -463,6 +465,7 @@ impl Default for Person {
             pane_scrollbars: true,
             browser_url: browser::DEFAULT_URL.into(),
             browser_search: browser::DEFAULT_SEARCH.into(),
+            browser_chrome: "browser-chrome".into(),
             minimum_contrast: 1.0,
             option_as_alt: OptionAsAlt::Auto,
             appearance: Appearance::System,

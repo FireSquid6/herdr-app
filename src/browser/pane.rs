@@ -1,7 +1,7 @@
 use super::{bridge::Callbacks, surface::Geometry};
 use cef::{ImplBrowser, ImplBrowserHost, ImplFrame};
 use gpui::{prelude::*, *};
-use gpui_base::input::{Input, InputEvent, InputState};
+use gpui_shell::{ShellRoot, ShellRuntime};
 use std::{
     cell::RefCell,
     path::PathBuf,
@@ -36,13 +36,16 @@ pub struct BrowserPane {
     closed: bool,
     visible: bool,
     status: super::bridge::LoadStatus,
-    address: Entity<InputState>,
+    page_view: Entity<crate::browser_chrome::NativePage>,
+    chrome: Option<Entity<ShellRoot>>,
+    chrome_runtime: Rc<ShellRuntime>,
+    chrome_copy: u64,
     geometry: Geometry,
     url: String,
     error: Option<String>,
 }
 impl BrowserPane {
-    pub fn new(options: BrowserOptions, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(options: BrowserOptions, runtime: Rc<ShellRuntime>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         cx.on_release_in(window, |this, window, _| {
             this.begin_close();
             if let Some(image) = this.surface.borrow_mut().image.take() {
@@ -74,28 +77,6 @@ impl BrowserPane {
         .detach();
         tracing::info!(workspace = %options.workspace, pane = %options.pane, remote = options.remote, "native browser pane constructed");
         let url = crate::settings::browser_target(&options.url);
-        let address = cx.new(|cx| {
-            let mut state =
-                InputState::new(window, cx).placeholder("Search Google or enter address");
-            state.set_value(url.clone(), window, cx);
-            state
-        });
-        cx.subscribe_in(
-            &address,
-            window,
-            |this, input, event: &InputEvent, window, cx| {
-                if matches!(event, InputEvent::Focus) {
-                    if let Some(host) = this.host() {
-                        host.set_focus(0);
-                    }
-                }
-                if matches!(event, InputEvent::PressEnter { .. }) {
-                    let url = input.read(cx).value().to_string();
-                    this.navigate(url, window, cx);
-                }
-            },
-        )
-        .detach();
         cx.spawn_in(window, async move |view, cx| {
             loop {
                 cx.background_executor()
@@ -117,7 +98,9 @@ impl BrowserPane {
         })
         .detach();
         let error = (!super::policy::local_allowed(options.remote)).then(|| "Remote browser route unavailable. Move this pane to a local workspace; direct remote networking is blocked until a verified route is configured.".into());
-        Self {
+        let owner = cx.entity().downgrade();
+        let page_view = cx.new(|_| crate::browser_chrome::NativePage(owner));
+        let view = Self {
             options,
             surface: Rc::new(RefCell::new(Surface::default())),
             shared: Arc::new(Callbacks::default()),
@@ -127,11 +110,16 @@ impl BrowserPane {
             closed: false,
             visible: true,
             status: super::bridge::LoadStatus::default(),
-            address,
+            page_view,
+            chrome: None,
+            chrome_runtime: runtime,
+            chrome_copy: 0,
             geometry: Geometry::default(),
             url,
             error,
-        }
+        };
+        view.publish_chrome();
+        view
     }
     /// Hidden pages retain their last atlas image and process lifecycle/navigation
     /// events, but do not create browsers, accept paint copies or upload images.
@@ -160,6 +148,7 @@ impl BrowserPane {
     /// CEF's runtime registry retains the browser only until OnBeforeClose.
     pub fn close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.begin_close();
+        self.chrome = None;
         if let Some(image) = self.surface.borrow_mut().image.take() {
             let _ = window.drop_image(image);
         }
@@ -170,6 +159,7 @@ impl BrowserPane {
             return;
         }
         self.closed = true;
+        crate::browser_chrome::remove(&self.options.pane);
         self.shared.hidden.store(true, Ordering::Release);
         self.shared.mailbox.close();
         if let Ok(mut navigated) = self.shared.navigated.lock() {
@@ -186,14 +176,13 @@ impl BrowserPane {
     pub fn current_url(&self) -> String {
         self.url.clone()
     }
-    pub fn navigate(&mut self, url: String, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn navigate(&mut self, url: String, _window: &mut Window, cx: &mut Context<Self>) {
         if self.closed || self.options.remote {
             return;
         }
         self.url = crate::settings::browser_target(&url);
-        self.address.update(cx, |state, cx| {
-            state.set_value(self.url.clone(), window, cx)
-        });
+        self.refresh_chrome(cx);
+        crate::mods::deliver_command_to(self.chrome_copy, "navigated");
         if let Some(frame) = self.browser.as_ref().and_then(|b| b.main_frame()) {
             frame.load_url(Some(&self.url.as_str().into()));
         }
@@ -219,18 +208,35 @@ impl BrowserPane {
             b.stop_load();
         }
     }
-    pub fn focus_address(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.closed {
+    pub fn focus_address(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        if self.closed || !self.visible {
             return;
         }
         if let Some(host) = self.host() {
             host.set_focus(0);
         }
-        self.address.update(cx, |state, cx| {
-            state.focus(window, cx);
-            state.select_all(window, cx);
-        });
+        crate::mods::deliver_command_to(self.chrome_copy, "focus_address");
+        cx.notify();
     }
+    fn publish_chrome(&self) {
+        crate::browser_chrome::publish(&self.options.pane, serde_json::json!({
+            "pane": self.options.pane, "workspace": self.options.workspace,
+            "url": self.url, "loading": self.status.loading,
+            "can_back": self.status.can_back, "can_forward": self.status.can_forward,
+            "remote": self.options.remote, "closed": self.closed, "available": true,
+            "error": self.error.as_ref().or(self.status.error.as_ref()),
+        }), self.page_view.downgrade());
+    }
+    /// Chrome is an ordinary app-owned mod copy, including hot reload and close.
+    pub fn set_chrome(&mut self, root: Option<Entity<ShellRoot>>, copy: u64, cx: &mut Context<Self>) {
+        if self.chrome_copy == copy { return; }
+        self.chrome = root;
+        self.chrome_copy = copy;
+        self.refresh_chrome(cx);
+        crate::mods::deliver_command_to(copy, "navigated");
+        cx.notify();
+    }
+
     fn host(&self) -> Option<cef::BrowserHost> {
         if self.closed {
             return None;
@@ -238,9 +244,8 @@ impl BrowserPane {
         self.browser.as_ref()?.host()
     }
     fn tick(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.closed || self.error.is_some() {
-            return;
-        }
+        if self.closed { return; }
+        if self.error.is_some() { return; }
         if self.visible && self.browser.is_none() {
             match super::create_page(&self.options, self.shared.clone(), &self.url) {
                 Ok(browser) => {
@@ -254,6 +259,7 @@ impl BrowserPane {
                 Err(error) => {
                     tracing::error!(pane = %self.options.pane, %error, "native browser page creation failed");
                     self.error = Some(error.to_string());
+                    self.refresh_chrome(cx);
                     cx.notify();
                     return;
                 }
@@ -276,14 +282,15 @@ impl BrowserPane {
         let navigated = self.shared.navigated.lock().ok().and_then(|mut n| n.take());
         if let Some(url) = navigated {
             self.url = url.clone();
-            self.address
-                .update(cx, |state, cx| state.set_value(url.clone(), window, cx));
+            self.refresh_chrome(cx);
+            crate::mods::deliver_command_to(self.chrome_copy, "navigated");
             cx.emit(BrowserEvent::Navigated(url));
         }
         let status = self.shared.status.lock().ok().map(|status| status.clone());
         if let Some(status) = status {
             if status != self.status {
                 self.status = status;
+                self.refresh_chrome(cx);
                 cx.notify();
             }
         }
@@ -299,7 +306,7 @@ impl BrowserPane {
                     if let Some(old) = self.surface.borrow_mut().image.replace(image) {
                         let _ = window.drop_image(old);
                     }
-                    cx.notify();
+                    self.page_view.update(cx, |_, cx| cx.notify());
                 }
             }
         }
@@ -315,14 +322,21 @@ impl BrowserPane {
         cef::MouseEvent { x, y, modifiers: 0 }
     }
 }
-impl Render for BrowserPane {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+impl BrowserPane {
+    fn refresh_chrome(&self, cx: &mut Context<Self>) {
+        self.publish_chrome();
+        if let Some(root) = &self.chrome { let _ = self.chrome_runtime.refresh(root, cx); }
+    }
+    /// Materialized only inside a trusted mod's BrowserPage slot. No toolbar,
+    /// address editor or surrounding layout is hardcoded here.
+    pub fn render_page(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        if self.closed || self.error.is_some() { return div().into_any_element(); }
         let pre = self.surface.clone();
         let paint = self.surface.clone();
         let shared = self.shared.clone();
         let content = div()
             .id("browser")
-            .flex_1()
+            .size_full()
             .min_h_0()
             .overflow_hidden()
             .track_focus(&self.page_focus)
@@ -435,68 +449,14 @@ impl Render for BrowserPane {
                 )
                 .size_full(),
             );
-        div()
-            .track_focus(&self.focus)
-            .size_full()
-            .flex()
-            .flex_col()
-            .overflow_hidden()
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .p_2()
-                    .bg(rgb(0x25252b))
-                    .text_color(rgb(0xeeeeee))
-                    .flex_shrink_0()
-                    .child(
-                        div()
-                            .id("back")
-                            .child("Back")
-                            .on_click(cx.listener(|this, _, window, cx| this.back(window, cx))),
-                    )
-                    .child(
-                        div()
-                            .id("forward")
-                            .child("Forward")
-                            .on_click(cx.listener(|this, _, window, cx| this.forward(window, cx))),
-                    )
-                    .child(
-                        div()
-                            .id("reload")
-                            .child("Reload")
-                            .on_click(cx.listener(|this, _, window, cx| this.reload(window, cx))),
-                    )
-                    .child(
-                        div()
-                            .id("stop")
-                            .child("Stop")
-                            .on_click(cx.listener(|this, _, window, cx| this.stop(window, cx))),
-                    )
-                    .child(div().flex_1().min_w_0().child(Input::new(&self.address))),
-            )
-            .child(div().px_2().py_1().text_sm().child(format!(
-                "Workspace: {} · {}",
-                self.options.workspace.chars().take(128).collect::<String>(),
-                if self.options.remote {
-                    "Remote route blocked"
-                } else {
-                    "Local networking · localhost is this computer"
-                }
-            )))
-            .when(self.status.loading, |view| {
-                view.child(div().px_2().child("Loading…"))
-            })
-            .when_some(self.status.error.clone(), |view, error| {
-                view.child(div().p_2().child(error))
-            })
-            .when_some(self.error.clone(), |view, error| {
-                view.child(div().p_4().child(error))
-            })
-            .when(!self.closed && self.error.is_none(), |view| {
-                view.child(content)
-            })
+        content.into_any_element()
+    }
+}
+impl Render for BrowserPane {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        div().track_focus(&self.focus).size_full().overflow_hidden()
+            .when_some(self.chrome.clone(), |el, root| el.child(root))
+
     }
 }
 

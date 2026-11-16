@@ -9,6 +9,8 @@ use std::sync::{
 #[derive(Clone, Default, PartialEq, Eq)]
 pub struct LoadStatus {
     pub loading: bool,
+    pub can_back: bool,
+    pub can_forward: bool,
     pub error: Option<String>,
     pub failed: bool,
 }
@@ -72,10 +74,12 @@ wrap_life_span_handler! {
 wrap_load_handler! {
     pub struct Navigation { shared: Arc<Callbacks> }
     impl LoadHandler {
-        fn on_loading_state_change(&self, _browser: Option<&mut Browser>, loading: i32, _back: i32, _forward: i32) {
+        fn on_loading_state_change(&self, _browser: Option<&mut Browser>, loading: i32, back: i32, forward: i32) {
             tracing::info!(loading = loading != 0, "CEF loading state changed");
             if let Ok(mut status) = self.shared.status.lock() {
                 status.loading = loading != 0;
+                status.can_back = back != 0;
+                status.can_forward = forward != 0;
                 if loading != 0 { status.error = None; status.failed = false; }
             }
         }

@@ -568,7 +568,8 @@ The main ones:
   skip settled tabs).
 - Panes: `pane.split {direction: "right" | "down", pane?, argv? | mod?, props?}` (a new
   terminal, or a mod pane), `pane.close {pane?}`,
-  `pane.zoom {pane?}`, `pane.focus {pane | terminal}`, `pane.go {direction}`,
+  `pane.zoom {pane?}`, `pane.menu {pane?}` (the layout-selected menu, with its
+  dimensions and fallback; also works on blocked/unavailable browser panes), `pane.focus {pane | terminal}`, `pane.go {direction}`,
   `pane.swap {pane?, direction | target}`.
   `pane.go` prefers the most recently focused pane along the nearest edge in that
   direction; unvisited panes fall back to overlap, then top/left layout order.
@@ -608,6 +609,24 @@ The main ones:
   `browser-profiles/` in the app home, isolated per space (cookies/site storage
   may persist there). This is an experimental fork, not a production browser or
   a completed security/performance audit.
+  Chrome is one trusted mod selected globally by `browser_chrome`. Its
+  `props().pane` identifies the page; `browserState(pane)` returns URL, workspace,
+  loading, can_back/can_forward, remote, closed, available and error (or null for
+  an unknown pane). Browser-free builds still load the chrome, with available=false
+  and the explanatory error; BrowserPage is empty.
+  Use normal `browser.*` commands with that pane ID. Import `BrowserPage` from
+  `herdr-browser` to place native page pixels/input anywhere in your flex layout:
+  `div().flex_1().min_h(0).child(BrowserPage(props().pane))`. Place it exactly once.
+  Address fields are normal `InputState`/`Input` elements owned/styled by the mod.
+  `nextCommand()` receives `focus_address` (focus/select your address editor) and
+  `navigated` (sync it from browserState). No automatic focus theft on render.
+  URL/error/workspace text must remain inert text: never eval, import, run commands
+  from, or otherwise interpret page metadata as trusted instructions. The page
+  renderer has no Herdr module, core connection or command bridge. A broken mod
+  reports its error; select `browser-chrome` again to recover. Tabs/context menus
+  and browser clipboard support are not part of this boundary yet. The shipped
+  Pane menu entry uses `pane.menu`, respecting the layout's `terminal_menu`,
+  custom dimensions and missing-mod fallback; the entry is customizable too.
 - Terminals: `terminal.open {argv?, folder?, place?, name?}` (`folder` sets the
   starting directory for tabs and right/down splits, with or without `argv`), `terminal.kill {terminal}`,
   `terminal.keep {terminal, place?}`, `terminal.park {terminal}`,
@@ -766,6 +785,10 @@ What's about the user, never a look:
   Clipboard reads (`?`) are never allowed.
 - `browser_url`: the initial URL for `browser.new` when omitted (default
   `https://www.google.com`). Optional Linux browser prototype only.
+- `browser_chrome`: global trusted browser mod name (default `browser-chrome`).
+  Clone with `mod.clone`, edit the personal copy, then select its name here.
+  This replaces the entire toolbar/address/surrounding layout for all browser
+  panes, not a list of configurable buttons. Changes apply live.
 - `browser_search`: HTTP(S) search template, default
   `https://www.google.com/search?q={query}`. `{query}` is replaced with
   percent-encoded search terms. An invalid/non-HTTP(S) template or one without

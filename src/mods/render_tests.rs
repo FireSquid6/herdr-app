@@ -58,6 +58,7 @@ impl Drop for Staged {
 
 #[derive(Default)]
 struct Calls {
+    commands: Option<async_channel::Receiver<String>>,
     unexpected: Vec<String>,
     effects: Vec<(String, Vec<Value>)>,
     shared: BTreeMap<String, Value>,
@@ -76,6 +77,7 @@ fn fixture(populated: bool, props: Value, update: Value) -> BTreeMap<String, Val
         json!({"key":"pi", "name":"Pi", "icon":null, "tint":true, "tile":"#334455", "color":"#aabbcc", "shell":false, "agent":true});
     let mut values = BTreeMap::from([
         ("props".into(), props),
+        ("browserState".into(), Value::Null),
         ("machines".into(), json!([{ "name": null, "layout": "ready" }])),
         ("spaces".into(), json!([])), ("agents".into(), json!([])), ("terminals".into(), json!([])), ("panes".into(), json!([])), ("focused".into(), Value::Null),
         ("layout".into(), serde_json::from_str(include_str!("../../defaults/layouts/main.json")).unwrap()),
@@ -152,7 +154,17 @@ fn module(values: BTreeMap<String, Value>, calls: Rc<RefCell<Calls>>) -> HostMod
     module = module.async_function("feedbackPickImages", |_| Ok(async { Ok(HostValue::Array(vec![])) }));
     module = module.async_function("knownAgents", |_| Ok(async { Ok(HostValue::Array(vec![])) }));
     module = module.async_function("pickFolder", |_| Ok(async { Ok(HostValue::Null) }));
-    for name in ["nextCommand", "watchFolder"] {
+    let commands = calls.borrow().commands.clone();
+    module = module.async_function("nextCommand", move |_| {
+        let commands = commands.clone();
+        Ok(async move {
+            match commands {
+                Some(rx) => rx.recv().await.map(HostValue::Str).map_err(|e| HostError::new(e.to_string())),
+                None => std::future::pending::<gpui_shell::HostResult>().await,
+            }
+        })
+    });
+    for name in ["watchFolder"] {
         module = module.async_function(name, |_| Ok(std::future::pending::<gpui_shell::HostResult>()));
     }
     for name in ["exec", "hc", "readTextFile", "writeTextFile", "sendFeedback"] {
@@ -376,7 +388,7 @@ fn describe_with_values(
         .with_storage_path(staged.0.join(format!("store-{}.json", NEXT_STORE.fetch_add(1, Ordering::Relaxed))))
         .with_capabilities(Capabilities::new().storage(true).read_roots([staged.0.clone()]))
         .with_host_module(module(values, calls.clone()))?;
-    let runtime = ShellRuntime::new_isolated()?;
+    let runtime = ShellRuntime::new_isolated_with_components(crate::browser_chrome::components())?;
     let root = setup.map(|s| staged.wrapper(entry, s)).unwrap_or_else(|| staged.0.join(entry));
     let window = cx.add_window(|_, _| Empty);
     let result = window.update(cx, |_, window, cx| {
@@ -391,6 +403,7 @@ fn describe_with_values(
     // staged folder is still there, or they recreate it after its drop.
     cx.run_until_parked();
     assert!(calls.borrow().unexpected.is_empty(), "{entry}: {:?}", calls.borrow().unexpected);
+    if entry == "mods/browser-chrome" { assert!(calls.borrow().effects.is_empty(), "chrome must not act on metadata during render"); }
     result
 }
 
@@ -1062,4 +1075,76 @@ fn status_bar_shows_the_real_palette_key(cx: &mut TestAppContext) {
     let tree = describe_with_values(cx, &staged, "mods/workspace-status", unbound, None).unwrap();
     assert!(tree.contains("commands"), "unbound hint still offers commands: {tree}");
     assert!(!tree.contains("Shift P"), "unbound hint must not invent a key: {tree}");
+}
+
+#[gpui::test]
+fn browser_chrome_is_a_replaceable_description(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let mut values = fixture(false, json!({"pane":"p1"}), updates("current", "current"));
+    values.insert("browserState".into(), json!({"pane":"p1", "workspace":"s1", "url":"https://example.com", "loading":true, "can_back":false, "can_forward":true}));
+    let tree = describe_with_values(cx, &staged, "mods/browser-chrome", values.clone(), None).unwrap();
+    assert!(tree.contains("browser-toolbar"), "{tree}");
+    assert!(tree.contains("Stop"), "{tree}");
+    assert!(tree.contains("browser-address"), "{tree}");
+    let back = tree.lines().find(|line| line.contains("browser-back")).unwrap();
+    let forward = tree.lines().find(|line| line.contains("browser-forward")).unwrap();
+    assert!(!back.contains("on_click"), "disabled Back must not dispatch: {back}");
+    assert!(forward.contains("on_click"), "enabled Forward must dispatch: {forward}");
+    std::fs::create_dir_all(staged.0.join("mods/alternate-browser")).unwrap();
+    std::fs::write(staged.0.join("mods/alternate-browser/main.js"), include_str!("../../tests/fixtures/browser-chrome-alternate/main.js")).unwrap();
+    let alternate = describe_with_values(cx, &staged, "mods/alternate-browser", values, None).unwrap();
+    assert!(alternate.contains("alternate-browser-chrome") && alternate.contains("ALTERNATE CHROME"), "{alternate}");
+    assert!(alternate.contains("alternate-address"), "{alternate}");
+    assert!(!alternate.contains("browser-toolbar"), "{alternate}");
+}
+
+#[gpui::test]
+fn browser_metadata_remains_inert_text_and_unavailable_chrome_keeps_the_pane_menu(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let mut values = fixture(false, json!({"pane":"p1"}), updates("current", "current"));
+    values.insert("browserState".into(), json!({
+        "pane":"p1", "workspace":"s1", "url":"https://example.com/?q=');run('app.quit');//",
+        "error":"<script>run('app.quit')</script>\u{fffd}", "available": false,
+        "loading":false, "can_back":false, "can_forward":false
+    }));
+    let tree = describe_with_values(cx, &staged, "mods/browser-chrome", values, None).unwrap();
+    assert!(tree.contains("<script>run('app.quit')</script>"), "{tree}");
+    assert!(tree.contains("Pane menu"), "{tree}");
+    assert!(tree.contains("Reload"), "{tree}");
+    // The description harness rejects unexpected host calls: the purported
+    // script above must stay an ordinary text child, never a host invocation.
+}
+
+#[gpui::test]
+fn browser_address_focus_is_explicit_and_rerender_never_steals_it(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let mut values = fixture(false, json!({"pane":"p1"}), updates("current", "current"));
+    values.insert("focused".into(), json!({"pane":"p1"}));
+    values.insert("browserState".into(), json!({"pane":"p1","workspace":"s1","url":"https://example.com","loading":false,"can_back":false,"can_forward":false}));
+    let (tx, rx) = async_channel::unbounded();
+    let calls = Rc::new(RefCell::new(Calls { commands: Some(rx), ..Default::default() }));
+    let policy = Policy::new().with_host_module(module(values, calls)).unwrap();
+    let runtime = ShellRuntime::new_isolated_with_components(crate::browser_chrome::components()).unwrap();
+    let window = cx.add_window(|_, _| Empty);
+    let (mut session, page_focus) = window.update(cx, |_, window, cx| {
+        let page_focus = cx.focus_handle();
+        page_focus.focus(window, cx);
+        let session = DescriptionSession::load(runtime, staged.0.join("mods/browser-chrome"), policy, window, cx).unwrap();
+        assert!(page_focus.is_focused(window), "initializing chrome must not take page focus");
+        (session, page_focus)
+    }).unwrap();
+    tx.try_send("focus_address".into()).unwrap();
+    cx.run_until_parked();
+    window.update(cx, |_, window, cx| {
+        assert!(!page_focus.is_focused(window), "explicit focus_address must focus the editor");
+        page_focus.focus(window, cx);
+        session.describe(window, cx).unwrap();
+        assert!(page_focus.is_focused(window), "render must not refocus the editor");
+        window.remove_window();
+    }).unwrap();
+    drop(session);
+    cx.run_until_parked();
 }

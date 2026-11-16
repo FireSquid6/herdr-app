@@ -82,7 +82,16 @@ an HTTP(S) address or search terms. `browser.back`, `browser.forward`,
 `browser.reload`, `browser.stop` and `browser.focus_address` take optional `pane`
 (default: focused browser). Configure `browser_url` (Google by default) and
 `browser_search` (`https://www.google.com/search?q={query}`) in settings.json;
-customize commands through keys or a mod. Normal pane split/focus/zoom/close works.
+customize commands through keys or a mod. `browser_chrome` selects one global
+trusted mod (default `browser-chrome`) that owns the toolbar, native address
+editor styling, and surrounding layout. Clone the shipped mod with `mod.clone`,
+edit the personal copy, and select its name in settings.json; it hot reloads.
+Its props contain `pane`; `browserState(pane)` is inert data and `BrowserPage`
+from `herdr-browser` composes the native page. Never execute page metadata as
+mod code or command arguments. See the installed AGENTS.md/API declarations.
+Normal pane split/focus/zoom/close works. `pane.menu {pane?}` opens the
+layout-selected pane menu (also on blocked/unavailable pages), preserving its
+custom dimensions and missing-mod fallback.
 Only last committed URL is layout-persisted, not history/forms; cookies/site data
 may persist in the app home's per-space `browser-profiles/`. Hidden panes stay
 live; removing or retargeting a pane discards its session. Cross-space moves are
