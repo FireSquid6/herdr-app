@@ -44,7 +44,18 @@ struct AddressContext {
     focus: FocusHandle,
     selection: bool,
 }
+struct ClipboardOperation {
+    id: super::clipboard_shuttle::TransactionId,
+    owner: super::clipboard_shuttle::OwnerStamp,
+    operation: super::clipboard_shuttle::Operation,
+    frame: super::context_menu::Identity,
+}
 pub struct BrowserPane {
+    clipboard: Option<ClipboardOperation>,
+    clipboard_ready: bool,
+    clipboard_busy: bool,
+    clipboard_outcome: &'static str,
+    clipboard_error: Option<String>,
     editing_generation: u64,
     page_context: Option<super::context_menu::PageContext>,
     address_context: Option<AddressContext>,
@@ -150,6 +161,11 @@ impl BrowserPane {
             geometry: Geometry::default(),
             url,
             error,
+            clipboard: None,
+            clipboard_ready: false,
+            clipboard_busy: false,
+            clipboard_outcome: "idle",
+            clipboard_error: None,
             editing_generation: 0,
             page_context: None,
             address_context: None,
@@ -357,7 +373,12 @@ impl BrowserPane {
             "error": self.error.as_ref().or(self.status.error.as_ref()),
             "owner": self.browser.as_ref().map(|browser| browser.identifier().to_string()),
             "can_open_link_in_tab": self.can_open_link_in_tab,
-            "clipboard_available": false,
+            "clipboard_available": !self.closed && !self.options.remote && self.browser.is_some() && super::clipboard_available(),
+            "clipboard_pending": self.clipboard.is_some(),
+            "clipboard_transport_busy": super::clipboard_busy(),
+            "clipboard_request": self.clipboard.as_ref().map(|pending| pending.id.get().to_string()),
+            "clipboard_outcome": self.clipboard_outcome,
+            "clipboard_error": self.clipboard_error,
             "context": self.page_context.as_ref().map(|menu| serde_json::json!({
                 "source": "page", "token": menu.token.to_string(), "link": menu.link, "selection": menu.selection,
                 "editable": menu.editable, "can_copy": menu.can_copy,
@@ -438,6 +459,7 @@ impl BrowserPane {
             self.geometry = geometry;
         }
         self.drain_editing(window, cx);
+        self.drain_clipboard(window, cx);
         let navigated = self.shared.navigated.lock().ok().and_then(|mut n| n.take());
         if let Some(url) = navigated {
             self.invalidate_editing();
@@ -474,7 +496,7 @@ impl BrowserPane {
         }
         self.publish_chrome();
     }
-    fn mouse(&self, point: Point<Pixels>) -> cef::MouseEvent {
+    fn mouse(&self, point: Point<Pixels>, modifiers: u32) -> cef::MouseEvent {
         let origin = self.surface.borrow().bounds.origin;
         let (x, y) = self.geometry.local_point(
             point.x.into(),
@@ -482,7 +504,7 @@ impl BrowserPane {
             origin.x.into(),
             origin.y.into(),
         );
-        cef::MouseEvent { x, y, modifiers: 0 }
+        cef::MouseEvent { x, y, modifiers }
     }
 }
 impl BrowserPane {
@@ -506,12 +528,13 @@ impl BrowserPane {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                    if this.abandon_clipboard() { this.refresh_chrome(cx); }
                     this.dismiss_context(cx);
                     this.page_focus.focus(window, cx);
                     if let Some(host) = this.host() {
                         host.set_focus(1);
                         host.send_mouse_click_event(
-                            Some(&this.mouse(event.position)),
+                            Some(&this.mouse(event.position, pointer_modifiers(&event.modifiers, Some(event.button)))),
                             cef::MouseButtonType::LEFT,
                             0,
                             event.click_count as i32,
@@ -520,17 +543,18 @@ impl BrowserPane {
                 }),
             )
             .on_mouse_down(MouseButton::Right, cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                if this.abandon_clipboard() { this.refresh_chrome(cx); }
                 this.dismiss_context(cx);
                 this.page_focus.focus(window, cx);
                 this.shared.editing_active.store(true, Ordering::Release);
                 if let Some(host) = this.host() {
                     host.set_focus(1);
-                    host.send_mouse_click_event(Some(&this.mouse(event.position)), cef::MouseButtonType::RIGHT, 0, 1);
+                    host.send_mouse_click_event(Some(&this.mouse(event.position, pointer_modifiers(&event.modifiers, Some(event.button)))), cef::MouseButtonType::RIGHT, 0, 1);
                 }
             }))
             .on_mouse_up(MouseButton::Right, cx.listener(|this, event: &MouseUpEvent, _, _| {
                 if let Some(host) = this.host() {
-                    host.send_mouse_click_event(Some(&this.mouse(event.position)), cef::MouseButtonType::RIGHT, 1, 1);
+                    host.send_mouse_click_event(Some(&this.mouse(event.position, pointer_modifiers(&event.modifiers, None))), cef::MouseButtonType::RIGHT, 1, 1);
                 }
             }))
             .on_mouse_up(
@@ -538,7 +562,7 @@ impl BrowserPane {
                 cx.listener(|this, event: &MouseUpEvent, _, _| {
                     if let Some(host) = this.host() {
                         host.send_mouse_click_event(
-                            Some(&this.mouse(event.position)),
+                            Some(&this.mouse(event.position, pointer_modifiers(&event.modifiers, None))),
                             cef::MouseButtonType::LEFT,
                             1,
                             event.click_count as i32,
@@ -548,14 +572,14 @@ impl BrowserPane {
             )
             .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, _| {
                 if let Some(host) = this.host() {
-                    host.send_mouse_move_event(Some(&this.mouse(event.position)), 0);
+                    host.send_mouse_move_event(Some(&this.mouse(event.position, pointer_modifiers(&event.modifiers, event.pressed_button))), 0);
                 }
             }))
             .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _, _| {
                 if let Some(host) = this.host() {
                     let delta = event.delta.pixel_delta(px(20.));
                     host.send_mouse_wheel_event(
-                        Some(&this.mouse(event.position)),
+                        Some(&this.mouse(event.position, pointer_modifiers(&event.modifiers, None))),
                         f32::from(delta.x) as i32,
                         f32::from(delta.y) as i32,
                     );
@@ -563,14 +587,20 @@ impl BrowserPane {
             }))
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 this.dismiss_context(cx);
-                if event.keystroke.modifiers.control && !event.keystroke.modifiers.shift && !event.keystroke.modifiers.alt && !event.keystroke.modifiers.platform {
-                    let command = match event.keystroke.key.as_str() { "c" => Some("copy"), "x" => Some("cut"), "v" => Some("paste"), _ => None };
-                    if let Some(command) = command {
-                        let _ = this.edit(command, window, cx);
-                        cx.stop_propagation();
-                        return;
+                if let Some(command) = clipboard_shortcut(&event.keystroke.key, &event.keystroke.modifiers) {
+                    if let Err(error) = this.edit(command, window, cx) {
+                        this.clipboard_outcome = "failed";
+                        this.clipboard_error = Some(error);
+                        this.refresh_chrome(cx);
                     }
+                    // Never let Busy/NotReady fall through to Chromium's stub.
+                    cx.stop_propagation();
+                    return;
                 }
+                let changes_selection = super::surface::logical_key(&event.keystroke.key)
+                    .is_some_and(|code| !matches!(code, 16 | 17 | 18 | 91 | 92))
+                    || event.keystroke.key_char.as_ref().is_some_and(|text| !text.is_empty());
+                if changes_selection && this.abandon_clipboard() { this.refresh_chrome(cx); }
                 if let Some(host) = this.host() {
                     if let Some(code) = super::surface::logical_key(&event.keystroke.key) {
                         host.send_key_event(Some(&cef::KeyEvent {
@@ -668,6 +698,52 @@ fn key_modifiers(modifiers: &Modifiers) -> u32 {
         | u32::from(modifiers.platform) * 128
 }
 
+// Pinned Blink editing_behavior.cc's Linux OSR bindings, exact modifiers.
+// Plaintext transport makes PasteAndMatchStyle equivalent to coordinated Paste.
+fn clipboard_shortcut(key: &str, modifiers: &Modifiers) -> Option<&'static str> {
+    if modifiers.alt || modifiers.platform { return None; }
+    let key = key.to_ascii_lowercase();
+    if modifiers.control && !modifiers.shift {
+        match key.as_str() { "c" | "insert" => Some("copy"), "x" => Some("cut"), "v" => Some("paste"), _ => None }
+    } else if modifiers.control && modifiers.shift && key == "v" {
+        Some("paste")
+    } else if !modifiers.control && modifiers.shift {
+        match key.as_str() { "insert" => Some("paste"), "delete" => Some("cut"), _ => None }
+    } else { None }
+}
+fn pointer_modifiers(modifiers: &Modifiers, pressed: Option<MouseButton>) -> u32 {
+    use cef::sys::cef_event_flags_t as Flags;
+    key_modifiers(modifiers) | match pressed {
+        Some(MouseButton::Left) => Flags::EVENTFLAG_LEFT_MOUSE_BUTTON.0,
+        Some(MouseButton::Middle) => Flags::EVENTFLAG_MIDDLE_MOUSE_BUTTON.0,
+        Some(MouseButton::Right) => Flags::EVENTFLAG_RIGHT_MOUSE_BUTTON.0,
+        _ => 0,
+    }
+}
+// ClipboardItem::text() conflates an empty String entry with absent text and
+// can coerce file paths. This bridge promises only actual plaintext entries.
+fn clipboard_plaintext(item: gpui::ClipboardItem) -> Option<String> {
+    let mut text = None;
+    for entry in item.into_entries() {
+        if let gpui::ClipboardEntry::String(value) = entry {
+            text.get_or_insert_with(String::new).push_str(value.text());
+        }
+    }
+    text
+}
+
+fn clipboard_failure(error: super::clipboard_shuttle::Failure) -> String {
+    use super::clipboard_shuttle::Failure;
+    match error {
+        Failure::Busy => "Another page clipboard operation is still pending".into(),
+        Failure::NotReady => "Page clipboard is initializing; retry shortly".into(),
+        Failure::NoPlaintext => "Clipboard has no supported plain text".into(),
+        Failure::PayloadTooLarge => "Page clipboard text exceeds 64 KiB".into(),
+        Failure::OwnerChanged | Failure::Cancelled => "Page clipboard owner changed".into(),
+        Failure::RestartRequired => "Page clipboard transport failed; restart the app to recover".into(),
+        _ => format!("Page clipboard transport failed: {error:?}"),
+    }
+}
 impl BrowserPane {
     fn reconcile_editing_generation(&mut self) {
         let current = self.shared.editing_generation.load(Ordering::Acquire);
@@ -675,7 +751,16 @@ impl BrowserPane {
             self.invalidate_editing();
         }
     }
+    fn abandon_clipboard(&mut self) -> bool {
+        if let Some(pending) = self.clipboard.take() {
+            super::cancel_clipboard(pending.id);
+            self.clipboard_outcome = "cancelled";
+            true
+        } else { false }
+    }
     fn invalidate_editing(&mut self) {
+        self.abandon_clipboard();
+        self.clipboard_error = None;
         self.page_context = None;
         self.address_context = None;
         self.shared.invalidate_editing();
@@ -703,6 +788,7 @@ impl BrowserPane {
             return Err("Clipboard target is no longer focused".into());
         }
         if !self.page_focus.is_focused(window) {
+            self.abandon_clipboard();
             let focus = window.focused(cx).ok_or("Address editor lost focus")?;
             // Dispatch synchronously to this exact editor, never a later focus owner.
             match command {
@@ -714,7 +800,99 @@ impl BrowserPane {
             return Ok(());
         }
         self.dismiss_context(cx);
-        Err("Page clipboard temporarily unavailable pending native bridge integration and runtime acceptance".into())
+        let operation = match command {
+            "copy" => super::clipboard_shuttle::Operation::Copy,
+            "cut" => super::clipboard_shuttle::Operation::Cut,
+            "paste" => super::clipboard_shuttle::Operation::Paste,
+            _ => return Err("Unknown clipboard action".into()),
+        };
+        let (_, frame) = self.focused_frame().ok_or("Page clipboard owner unavailable")?;
+        let owner = super::clipboard_shuttle::OwnerStamp {
+            owner: frame.browser as u64,
+            document_generation: self.shared.editing_generation.load(Ordering::Acquire),
+        };
+        let text = if operation == super::clipboard_shuttle::Operation::Paste {
+            cx.read_from_clipboard().and_then(clipboard_plaintext)
+        } else { None };
+        let browser = self.browser.as_ref().ok_or("Page clipboard owner closed")?;
+        let id = super::begin_clipboard(owner, browser, operation, text).map_err(clipboard_failure)?;
+        self.clipboard = Some(ClipboardOperation { id, owner, operation, frame });
+        self.clipboard_outcome = "pending";
+        self.clipboard_error = None;
+        self.refresh_chrome(cx);
+        cx.notify();
+        Ok(())
+    }
+    fn clipboard_owner_is_current(&self, pending: &ClipboardOperation, window: &Window, cx: &App) -> bool {
+        !self.closed && self.visible && !self.options.remote
+            && self.page_focus.is_focused(window) && self.focus.contains_focused(window, cx)
+            && self.shared.editing_generation.load(Ordering::Acquire) == pending.owner.document_generation
+            && self.focused_frame().is_some_and(|(_, owner)| owner == pending.frame)
+    }
+    fn drain_clipboard(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let ready = super::clipboard_available();
+        let busy = super::clipboard_busy();
+        if ready != self.clipboard_ready || busy != self.clipboard_busy {
+            self.clipboard_ready = ready;
+            self.clipboard_busy = busy;
+            self.refresh_chrome(cx);
+        }
+        let Some(pending) = self.clipboard.as_ref() else { return; };
+        if !self.clipboard_owner_is_current(pending, window, cx) {
+            let pending = self.clipboard.take().unwrap();
+            super::cancel_clipboard(pending.id);
+            self.clipboard_outcome = "cancelled";
+            self.refresh_chrome(cx);
+            return;
+        }
+        let id = pending.id;
+        let owner = pending.owner;
+        let operation = pending.operation;
+        if matches!(super::clipboard_status(), Some(super::clipboard_shuttle::Status::ReadyForSource(ref request)) if request.transaction == id) {
+            if let Some(browser) = &self.browser {
+                if let Err(error) = super::dispatch_clipboard(id, owner, browser) {
+                    self.clipboard_error = Some(clipboard_failure(error));
+                } else if operation == super::clipboard_shuttle::Operation::Paste {
+                    // Dispatch is observable while the actor retains the buffer
+                    // until its native input-processing acknowledgment.
+                    self.clipboard_outcome = "paste-dispatched";
+                }
+                self.refresh_chrome(cx);
+            }
+        }
+        let Some(completion) = super::take_clipboard(id) else { return; };
+        let pending = self.clipboard.take().unwrap();
+        if completion.owner != pending.owner || completion.operation != pending.operation
+            || completion.source.browser_id != pending.frame.browser
+            || completion.source.frame_id != pending.frame.frame
+            || !self.clipboard_owner_is_current(&pending, window, cx) {
+            self.clipboard_outcome = "cancelled";
+        } else {
+            use super::clipboard_shuttle::{CompletionResult, Operation};
+            self.clipboard_error = None;
+            match completion.result {
+                CompletionResult::CopiedText(text) => {
+                    // The only page-to-OS side effect; no stale owner can reach it.
+                    cx.write_to_clipboard(ClipboardItem::new_string(text));
+                    self.clipboard_outcome = "copied";
+                }
+                CompletionResult::NoUpdateObserved => {
+                    self.clipboard_outcome = "no-update-observed";
+                    self.clipboard_error = Some(if pending.operation == Operation::Cut {
+                        "No page clipboard update observed; if Cut removed text, use Undo in the original editor".into()
+                    } else { "No page clipboard update observed".into() });
+                }
+                CompletionResult::PasteDispatched => self.clipboard_outcome = "paste-dispatched",
+                CompletionResult::Failed(error) => {
+                    self.clipboard_outcome = "failed";
+                    let mut message = clipboard_failure(error);
+                    if pending.operation == Operation::Cut { message.push_str("; if Cut removed text, use Undo in the original editor"); }
+                    self.clipboard_error = Some(message);
+                }
+            }
+        }
+        self.refresh_chrome(cx);
+        cx.notify();
     }
     /// The tab owner may consume a link capability and open the returned URL in
     /// a real browser tab. Never implement this with a Herdr workspace tab.
@@ -769,7 +947,13 @@ impl BrowserPane {
         let menu = menu?;
         match action {
             "dismiss" => {},
-            "copy_link" if !menu.link.is_empty() => cx.write_to_clipboard(ClipboardItem::new_string(menu.link)),
+            "copy_link" if !menu.link.is_empty() => {
+                self.abandon_clipboard();
+                cx.write_to_clipboard(ClipboardItem::new_string(menu.link));
+                self.clipboard_outcome = "link-copied";
+                self.clipboard_error = None;
+                self.refresh_chrome(cx);
+            }
             "open_link" if super::policy::allowed_navigation(&menu.link) => self.navigate(menu.link, window, cx),
             "copy" if menu.can_copy => { self.edit("copy", window, cx)?; },
             "cut" if menu.can_cut && menu.editable => { self.edit("cut", window, cx)?; },
@@ -818,6 +1002,38 @@ mod menu_owner_tests {
     struct Empty;
     impl Render for Empty {
         fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement { div() }
+    }
+    #[test]
+    fn plaintext_snapshot_retains_empty_strings_without_coercing_files() {
+        assert_eq!(super::clipboard_plaintext(gpui::ClipboardItem::new_string(String::new())), Some(String::new()));
+        assert_eq!(super::clipboard_plaintext(gpui::ClipboardItem::new_string("λ 🦀\n ".into())), Some("λ 🦀\n ".into()));
+        let files = gpui::ClipboardItem::from(gpui::ClipboardEntry::ExternalPaths(
+            gpui::ExternalPaths(vec![std::path::PathBuf::from("/owned/not-plaintext")].into())));
+        assert_eq!(super::clipboard_plaintext(files), None);
+    }
+    #[test]
+    fn only_pinned_linux_native_clipboard_chords_are_coordinated() {
+        for bits in 0..16 {
+            let modifiers = gpui::Modifiers { control: bits & 1 != 0, shift: bits & 2 != 0,
+                alt: bits & 4 != 0, platform: bits & 8 != 0, ..Default::default() };
+            for key in ["c", "x", "v", "insert", "delete"] {
+                let expected = match (key, bits) {
+                    ("c", 1) | ("insert", 1) => Some("copy"),
+                    ("x", 1) | ("delete", 2) => Some("cut"),
+                    ("v", 1 | 3) | ("insert", 2) => Some("paste"),
+                    _ => None,
+                };
+                assert_eq!(super::clipboard_shortcut(key, &modifiers), expected, "{key} modifiers {bits}");
+            }
+        }
+    }
+    #[test]
+    fn pointer_modifiers_keep_pressed_button_and_keyboard_state() {
+        let modifiers = gpui::Modifiers { shift: true, control: true, ..Default::default() };
+        assert_eq!(super::pointer_modifiers(&modifiers, Some(gpui::MouseButton::Left)), 22);
+        assert_eq!(super::pointer_modifiers(&modifiers, Some(gpui::MouseButton::Right)), 70);
+        assert_eq!(super::pointer_modifiers(&modifiers, Some(gpui::MouseButton::Middle)), 38);
+        assert_eq!(super::pointer_modifiers(&modifiers, None), 6);
     }
     fn menu(generation: u64) -> super::super::context_menu::PageContext {
         super::super::context_menu::PageContext {

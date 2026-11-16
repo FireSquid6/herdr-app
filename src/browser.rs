@@ -2,12 +2,13 @@
 //! this module is not a claim of a completed runtime sandbox/performance audit.
 mod arguments;
 mod bridge;
+mod clipboard_shuttle;
 mod context_menu;
 mod favicon;
 mod pane;
 mod policy;
 mod surface;
-use cef::{ImplBrowser, ImplBrowserHost};
+use cef::{ImplBrowser, ImplBrowserHost, ImplRequestContext};
 pub use pane::{BrowserEvent, BrowserOptions, BrowserPane};
 use std::{
     cell::RefCell,
@@ -42,7 +43,17 @@ struct State {
     pages: Vec<Page>,
     root: PathBuf,
 }
-thread_local! { static STATE: RefCell<Option<State>> = const { RefCell::new(None) }; }
+thread_local! {
+    static STATE: RefCell<Option<State>> = const { RefCell::new(None) };
+    static CLIPBOARD: RefCell<ClipboardRuntime> = RefCell::new(ClipboardRuntime::default());
+}
+#[derive(Default)]
+struct ClipboardRuntime {
+    attempted: bool,
+    shutting_down: bool,
+    coordinator: Option<clipboard_shuttle::Coordinator>,
+    failure: Option<clipboard_shuttle::Failure>,
+}
 static REGISTERED: AtomicBool = AtomicBool::new(false);
 
 fn safe_environment() -> anyhow::Result<()> {
@@ -75,7 +86,7 @@ pub fn execute_helper(args: &[String]) -> Option<i32> {
         eprintln!("{error}");
         return Some(2);
     }
-    let mut app = bridge::CefApplication::new(Arc::new(bridge::Callbacks::default()));
+    let mut app = bridge::application(Arc::new(bridge::Callbacks::default()));
     let _ = cef::api_hash(cef::sys::CEF_API_VERSION_LAST, 0);
     let args = cef::args::Args::new();
     let exit = cef::execute_process(
@@ -155,7 +166,7 @@ impl State {
         }
         safe_environment()?;
         tracing::info!(resources = %self.resources.display(), subprocess = %self.subprocess.display(), "initializing native browser engine for first local pane");
-        let mut app = bridge::CefApplication::new(self.ready.clone());
+        let mut app = bridge::application(self.ready.clone());
         let _ = cef::api_hash(cef::sys::CEF_API_VERSION_LAST, 0);
         let args = cef::args::Args::new();
         let settings = cef::Settings {
@@ -196,10 +207,10 @@ impl State {
 }
 
 fn pump() {
-    STATE.with_borrow_mut(|state| {
+    let ready = STATE.with_borrow_mut(|state| {
         if let Some(state) = state {
             if !state.engine_initialized {
-                return;
+                return false;
             }
             state.pump_count += 1;
             if state.pump_count == 1 {
@@ -218,8 +229,55 @@ fn pump() {
             state
                 .pages
                 .retain(|p| !p.shared.closed.load(Ordering::Acquire));
-        }
+            state.ready.ready.load(Ordering::Acquire)
+        } else { false }
     });
+    // The helper must not initialize CEF in a remote/no-page session. Its CEF
+    // callbacks touch mailboxes only; advance outside the runtime state borrow.
+    if ready {
+        CLIPBOARD.with_borrow_mut(|state| {
+            if !state.attempted && !state.shutting_down {
+                state.attempted = true;
+                match clipboard_shuttle::Coordinator::new(Instant::now()) {
+                    Ok(actor) => state.coordinator = Some(actor),
+                    Err(error) => state.failure = Some(error),
+                }
+            }
+            if let Some(actor) = &mut state.coordinator { actor.tick(Instant::now()); }
+        });
+    }
+}
+pub(super) fn clipboard_status() -> Option<clipboard_shuttle::Status> {
+    CLIPBOARD.with_borrow(|state| state.coordinator.as_ref().map(|actor| actor.status()))
+}
+pub(super) fn clipboard_available() -> bool {
+    use clipboard_shuttle::Status;
+    matches!(clipboard_status(), Some(Status::Idle | Status::SeedPending(_) | Status::ReadyForSource(_)
+        | Status::WaitingResult(_) | Status::AbandonedDraining(_) | Status::Complete { .. }))
+}
+pub(super) fn clipboard_busy() -> bool {
+    CLIPBOARD.with_borrow(|state| state.coordinator.as_ref().is_some_and(|actor| actor.is_busy()))
+}
+pub(super) fn begin_clipboard(owner: clipboard_shuttle::OwnerStamp, browser: &cef::Browser,
+    operation: clipboard_shuttle::Operation, text: Option<String>) -> Result<clipboard_shuttle::TransactionId, clipboard_shuttle::Failure> {
+    CLIPBOARD.with_borrow_mut(|state| {
+        let error = state.failure.unwrap_or(clipboard_shuttle::Failure::NotReady);
+        let actor = state.coordinator.as_mut().ok_or(error)?;
+        if operation == clipboard_shuttle::Operation::Paste {
+            actor.begin_paste(owner, browser, text, Instant::now())
+        } else { actor.begin_copy_cut(owner, browser, operation, Instant::now()) }
+    })
+}
+pub(super) fn dispatch_clipboard(id: clipboard_shuttle::TransactionId, owner: clipboard_shuttle::OwnerStamp,
+    browser: &cef::Browser) -> Result<(), clipboard_shuttle::Failure> {
+    CLIPBOARD.with_borrow_mut(|state| state.coordinator.as_mut()
+        .ok_or(clipboard_shuttle::Failure::NotReady)?.dispatch_source(id, owner, browser, Instant::now()))
+}
+pub(super) fn cancel_clipboard(id: clipboard_shuttle::TransactionId) {
+    CLIPBOARD.with_borrow_mut(|state| { if let Some(actor) = &mut state.coordinator { actor.cancel(id); } });
+}
+pub(super) fn take_clipboard(id: clipboard_shuttle::TransactionId) -> Option<clipboard_shuttle::Completion> {
+    CLIPBOARD.with_borrow_mut(|state| state.coordinator.as_mut()?.take_completion(id))
 }
 pub fn install(cx: &mut gpui::App) {
     cx.spawn(async move |cx| {
@@ -237,6 +295,10 @@ impl Runtime {
         if !self.active {
             return;
         }
+        CLIPBOARD.with_borrow_mut(|state| {
+            state.shutting_down = true;
+            if let Some(actor) = &mut state.coordinator { actor.shutdown(); }
+        });
         STATE.with_borrow(|state| {
             if let Some(state) = state {
                 for page in &state.pages {
@@ -251,7 +313,9 @@ impl Runtime {
         let started = Instant::now();
         loop {
             pump();
-            if STATE.with_borrow(|s| s.as_ref().is_none_or(|s| s.pages.is_empty())) {
+            if STATE.with_borrow(|s| s.as_ref().is_none_or(|s| s.pages.is_empty()))
+                && clipboard_shuttle::outstanding_helper_count() == 0
+                && CLIPBOARD.with_borrow(|state| state.coordinator.as_ref().is_none_or(|actor| actor.closing_count() == 0)) {
                 break;
             }
             if started.elapsed() > Duration::from_secs(10) {
@@ -262,6 +326,8 @@ impl Runtime {
             }
             std::thread::sleep(Duration::from_millis(10));
         }
+        // Release helper browser/context references before engine shutdown.
+        CLIPBOARD.with_borrow_mut(|state| { state.coordinator.take(); });
         let initialized = STATE
             .with_borrow_mut(|state| state.take().is_some_and(|state| state.engine_initialized));
         if initialized {
@@ -330,6 +396,8 @@ fn create_page(
             anyhow::ensure!(workspace.created.elapsed() < Duration::from_secs(20), "Workspace browser context initialization timed out. Check the staged CEF runtime/profile permissions and reopen this pane. Global context fallback is disabled.");
             return Ok(None);
         }
+        workspace.context.set_content_setting(None, None,
+            cef::ContentSettingTypes::CLIPBOARD_READ_WRITE, cef::ContentSettingValues::BLOCK);
         let ui_thread = cef::currently_on(cef::ThreadId::UI);
         tracing::info!(workspace = %options.workspace, pane = %options.pane, origin = %policy::diagnostic_origin(url), ui_thread, "creating windowless CEF page with initialized workspace context");
         anyhow::ensure!(ui_thread == 1, "CEF page creation requires its initialization/UI thread");

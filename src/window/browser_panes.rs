@@ -136,6 +136,9 @@ impl AppWindow {
             "url": url, "loading": false, "can_back": false, "can_forward": false,
             "remote": self.model.space_of(pane).is_some_and(|s| s.machine.is_some()),
             "closed": false, "available": false,
+            "owner": null, "can_open_link_in_tab": false, "context": null,
+            "clipboard_available": false, "clipboard_pending": false, "clipboard_transport_busy": false,
+            "clipboard_request": null, "clipboard_outcome": "unavailable", "clipboard_error": null,
             "error": "Browser unavailable: requires the optional Linux browser build and runtime.",
         }));
         let _ = url;
@@ -327,7 +330,8 @@ impl AppWindow {
             if name == "browser.address_context" {
                 let owner = Self::arg(args, "owner").ok_or("browser.address_context requires owner")?;
                 let selection = args.get("selection").and_then(Value::as_bool).unwrap_or(false);
-                slot.view.update(cx, |view, cx| view.address_context(owner, selection, window, cx))?;
+                slot.view.update(cx, |view, cx| view.address_context(owner, selection, window, cx))
+                    .inspect_err(|reason| tracing::warn!(%reason, "trusted browser address-menu request rejected"))?;
                 return Ok(json!({"pane":pane}));
             }
             if name == "browser.context_action" {

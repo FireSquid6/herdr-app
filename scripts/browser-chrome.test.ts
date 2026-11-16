@@ -191,7 +191,7 @@ test("page context actions carry only a one-shot token, never interpolated websi
 
 test("address right-click acquires its own owner-bound menu capability", () => {
   const { view, events, cx, state } = fixture(null);
-  find(view.render(), "browser-address")!.calls.on_mouse_down[1]({}, cx);
+  find(view.render(), "browser-address-context")!.calls.on_mouse_down[1]({}, cx);
   expect(events).toEqual([["browser.address_context", { pane: "p1", owner: "native-browser-7", selection: true }]]);
   state.context = { source: "address", token: "48", can_copy: true, editable: true };
   find(view.render(), "browser-context-copy")!.calls.on_click[0]({}, cx);
@@ -227,7 +227,7 @@ test("page editing stays disabled when capability is absent, but link-new-tab re
 test("address menu cannot apply its captured selection to edited text or another UTF-16 selection", () => {
   for (const changed of ["text", "selection"]) {
     const { view, events, cx, state, input } = fixture(null);
-    find(view.render(), "browser-address")!.calls.on_mouse_down[1]({}, cx);
+    find(view.render(), "browser-address-context")!.calls.on_mouse_down[1]({}, cx);
     state.context = {source: "address", token: "52", can_copy: true, editable: true};
     const tree = view.render();
     if (changed === "text") input.value = () => "replacement";
@@ -235,4 +235,12 @@ test("address menu cannot apply its captured selection to edited text or another
     find(tree, "browser-context-copy")!.calls.on_click[0]({}, cx);
     expect(events[1]).toEqual(["browser.context_action", {pane: "p1", token: "52", action: "dismiss"}]);
   }
+});
+
+
+test("address mouse events belong to a plain wrapper, not the shell's opaque Input", () => {
+  const { view } = fixture(null);
+  const tree = view.render();
+  expect(find(tree, "browser-address-context")?.calls.on_mouse_down?.[0]).toBe("right");
+  expect(find(tree, "browser-address")?.calls.on_mouse_down).toBeUndefined();
 });

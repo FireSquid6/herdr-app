@@ -1235,3 +1235,46 @@ fn trusted_address_selection_reports_utf16_without_native_context_menu(cx: &mut 
     let tree = describe_with_values(cx, &staged, "", values, None).unwrap();
     assert!(tree.contains("browser-address"), "{tree}");
 }
+
+#[gpui::test]
+fn browser_address_right_click_reaches_trusted_menu_through_native_input(cx: &mut TestAppContext) {
+    use gpui::{Context, Entity, IntoElement, MouseButton, Modifiers, ParentElement, Render, Styled, Window, div, point, px};
+    struct Host { root: Entity<gpui_shell::ShellRoot> }
+    impl Render for Host {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().w(px(500.)).h(px(160.)).child(self.root.clone())
+        }
+    }
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let mut values = fixture(false, json!({"pane":"address-pointer"}), updates("current", "current"));
+    values.insert("browserState".into(), json!({"pane":"address-pointer","workspace":"s","owner":"7","available":true,"url":"a🦀z"}));
+    let calls = Rc::new(RefCell::new(Calls::default()));
+    let range = Rc::new(RefCell::new(None));
+    let observed = range.clone();
+    let module = module(values, calls.clone()).function("recordRange", move |a| {
+        *observed.borrow_mut() = Some((from_host(a.value(0)?), from_host(a.value(1)?)));
+        Ok(HostValue::Null)
+    }).declarations(format!("{DECLARATIONS}\nexport function recordRange(start: number, end: number): void;"));
+    let path = staged.0.join("mods/browser-chrome/main.js");
+    let source = std::fs::read_to_string(&path).unwrap()
+        .replace("browserState, props", "recordRange, browserState, props")
+        .replace("const range = this.input.selected_range();", "const range = this.input.selected_range(); recordRange(range.start, range.end);");
+    std::fs::write(path, source).unwrap();
+    let root = staged.wrapper("mods/browser-chrome", "this.input.focus(); this.input.set_selected_range({start:1,end:3});");
+    gpui_shell::policy::set_default(Policy::new().with_host_module(module).unwrap());
+    let runtime = ShellRuntime::new_isolated_with_components(crate::browser_chrome::components()).unwrap();
+    let (_host, cx) = cx.add_window_view(|window, cx| Host { root: runtime.try_load(&root, window, cx).unwrap() });
+    gpui_shell::policy::set_default(Policy::new());
+    cx.run_until_parked();
+    cx.update(|window, cx| { let _ = window.draw(cx); });
+    let editor = cx.update(|window, cx| window.focused(cx).unwrap());
+    // Actual GPUI event dispatch through the native Input child, not a JS
+    // callback invocation. Shell listeners on opaque Input itself are unwired.
+    cx.simulate_mouse_down(point(px(200.), px(55.)), MouseButton::Right, Modifiers::default());
+    cx.run_until_parked();
+    assert!(cx.update(|window, _| editor.is_focused(window)), "menu request must retain the exact native editor focus");
+    assert_eq!(*range.borrow(), Some((json!(1), json!(3))), "right-click must preserve the exact UTF-16 selection");
+    assert_eq!(calls.borrow().effects, vec![("run".into(), vec![json!("browser.address_context"), json!({"pane":"address-pointer","owner":"7","selection":true})])]);
+    cx.update(|window, _| window.remove_window());
+}

@@ -123,21 +123,25 @@ export default class BrowserChrome extends View {
         .child(this.button("browser-back", "chevron-left", "Back", allowed && s.can_back, action("back")))
         .child(this.button("browser-forward", "chevron-right", "Forward", allowed && s.can_forward, action("forward")))
         .child(this.button("browser-reload-stop", s.loading ? "x" : "refresh", s.loading ? "Stop" : "Reload", allowed, action(s.loading ? "stop" : "reload")))
-        .child(Input.new(this.input).id("browser-address")
+        // Shell mouse listeners attach only to plain elements, not opaque Input.
+        .child(div().id("browser-address-context").flex_1().min_w(0)
           .when(allowed, el => el.on_mouse_down("right", (_e, cx) => {
             cx.stop_propagation();
             this.input.focus();
             const range = this.input.selected_range();
             this.addressMenu = { owner: s.owner, value: this.input.value(), ...range };
             run("browser.address_context", { pane: s.pane, owner: s.owner, selection: range.start !== range.end });
-          })).flex_1().min_w(0).h(30).px(10).rounded(8)
-          .border_1().border_color(this.editing ? t.accent : t.border).bg(t.input).text_color(t.foreground).text_size(13))
+          }))
+          .child(Input.new(this.input).id("browser-address").w_full().min_w(0).h(30).px(10).rounded(8)
+            .border_1().border_color(this.editing ? t.accent : t.border).bg(t.input).text_color(t.foreground).text_size(13)))
         .child(this.button("browser-pane-menu", "layers", "Pane menu", true,
           () => run("pane.menu", { pane: s.pane })))
         .when(s.loading, el => el.child(svg("mods/workspace-chrome/spinner.svg").size(14).flex_none().text_color(t.accent).spin(900).tooltip("Loading…"))))
       .child(div().flex_none().px(10).py(4).text_size(11).text_color(t.dim)
         .child(`Workspace: ${s.workspace} · ${s.remote ? "Remote route blocked" : "Local networking · localhost is this computer"}`))
       .when(Boolean(s.error), el => el.child(div().p(12).text_size(13).child(s.error)))
+      .when(Boolean(s.clipboard_error), el => el.child(div().id("browser-clipboard-error").px(10).py(4)
+        .text_size(11).text_color(t.muted).child(`Clipboard: ${s.clipboard_error}`)))
       .child(div().flex_1().min_h(0).overflow_hidden().child(BrowserPage(s.pane)))
       .when(Boolean(s.context), el => el.child(this.contextMenu(s)));
   }

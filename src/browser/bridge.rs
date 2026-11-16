@@ -350,11 +350,32 @@ wrap_browser_process_handler! {
         }
     }
 }
+wrap_render_process_handler! {
+    struct ClipboardRenderer { hooks: Arc<super::clipboard_shuttle::RendererHooks> }
+    impl RenderProcessHandler {
+        fn on_browser_created(&self, browser: Option<&mut Browser>, extra: Option<&mut DictionaryValue>) {
+            if let Some(browser) = browser { self.hooks.on_browser_created(browser, extra.as_deref()); }
+        }
+        fn on_browser_destroyed(&self, browser: Option<&mut Browser>) {
+            if let Some(browser) = browser { self.hooks.on_browser_destroyed(browser); }
+        }
+        fn on_process_message_received(&self, browser: Option<&mut Browser>, frame: Option<&mut Frame>, source: ProcessId, message: Option<&mut ProcessMessage>) -> i32 {
+            let (Some(browser), Some(frame), Some(message)) = (browser, frame, message) else { return 0; };
+            i32::from(self.hooks.on_process_message_received(browser, frame, source, message))
+        }
+    }
+}
+pub fn application(shared: Arc<Callbacks>) -> cef::App {
+    CefApplication::new(shared, Arc::new(super::clipboard_shuttle::RendererHooks::default()))
+}
 wrap_app! {
-    pub struct CefApplication { shared: Arc<Callbacks> }
+    pub struct CefApplication { shared: Arc<Callbacks>, renderer: Arc<super::clipboard_shuttle::RendererHooks> }
     impl App {
         fn browser_process_handler(&self) -> Option<BrowserProcessHandler> {
             Some(Process::new(self.shared.clone()))
+        }
+        fn render_process_handler(&self) -> Option<RenderProcessHandler> {
+            Some(ClipboardRenderer::new(self.renderer.clone()))
         }
         fn on_before_command_line_processing(&self, _kind: Option<&CefString>, command: Option<&mut CommandLine>) {
             if let Some(command) = command {
@@ -383,6 +404,8 @@ pub fn create(shared: Arc<Callbacks>, url: &str, context: &mut RequestContext) -
     let info = WindowInfo::default().set_as_windowless(0);
     let settings = BrowserSettings {
         windowless_frame_rate: 30,
+        javascript_access_clipboard: State::DISABLED,
+        javascript_dom_paste: State::DISABLED,
         background_color: 0xff202028,
         ..Default::default()
     };

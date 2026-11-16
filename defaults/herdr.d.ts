@@ -439,8 +439,19 @@ export interface BrowserState {
   /** Native browser identity for queuing an address-menu request. Not a pane ID. */
   owner?: string | null;
   can_open_link_in_tab?: boolean;
-  /** False while native page clipboard isolation acceptance is unresolved. Address editing is separate. */
-  clipboard_available?: boolean;
+  /** Page-text transport availability, not operation success or authorization. Address/link copy is separate. */
+  clipboard_available: boolean;
+  /** This pane has an accepted asynchronous request; Paste can remain pending after dispatch while native input drains. No payload is exposed. */
+  clipboard_pending: boolean;
+  /** The one app-global page clipboard actor is busy (possibly for another pane/workspace). */
+  clipboard_transport_busy: boolean;
+  /** Pending diagnostic request ID, not an action capability; null when none. */
+  clipboard_request: string | null;
+  /** idle, pending, copied, no-update-observed, paste-dispatched, cancelled, failed, link-copied; unavailable without native support.
+   * no-update-observed is not proven cancellation; paste-dispatched does not promise DOM insertion or that pending has cleared. */
+  clipboard_outcome: string;
+  /** Payload-free diagnostic, or null. Genuine transport failure requires app restart; healthy no-update allows a new user command. */
+  clipboard_error: string | null;
   /** Plain untrusted page data. Only the host-issued token authorizes actions. */
   context?: {
     source: "page" | "address"; token: string; link: string; selection: string;

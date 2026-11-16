@@ -649,13 +649,38 @@ The main ones:
   `browser.stop {pane?}`, `browser.focus_address {pane?}` target the focused
   browser by default. `herdr-app ls` includes each tab's `panes` with browser
   pane IDs, last URLs, durable `browser_tabs` and live `browser_state`; the existing `terminals` array remains available. Bind these in `keys.json` or invoke from a personal mod;
-  no browser shortcuts are imposed. Explicit global/layout keys take precedence
-  while a browser or its address field has focus; unbound editing keys stay there.
+  no general browser shortcuts are imposed. Explicit global/layout keys take
+  precedence while a browser or its address field has focus. Ordinary page
+  clipboard aliases are Ctrl+C/X/V, Ctrl+Shift+V (plain-text Paste), Ctrl+Insert
+  (Copy), Shift+Insert (Paste) and Shift+Delete (Cut), without Alt/Meta. Ctrl+Shift+C,
+  Ctrl+Shift+X, Ctrl+Shift+Insert and Ctrl+Shift+Delete are not clipboard aliases.
   `browser.copy {pane?}`, `browser.cut {pane?}` and `browser.paste {pane?}`
-  operate on the focused address editor. Page clipboard is temporarily unavailable
-  (`browserState(pane).clipboard_available` is false), pending native bridge
-  integration and isolated runtime acceptance. No IME/selection-mirror fallback
-  is enabled. Link-address copying is separate from page clipboard exchange.
+  target the focused page or native address editor. Page clipboard supports
+  plain text up to 64 KiB (UTF-8 bytes), not rich HTML/images. Stock CEF native
+  Copy/Cut/Paste preserves DOM events, custom clipboardData and cancellation;
+  no IME/selection-mirror fallback is used. Address editing and link-address
+  copying use separate ordinary GPUI clipboard paths.
+  Page command return means accepted asynchronously, not completed. Inspect
+  `browserState(pane).clipboard_pending`, `clipboard_request`, `clipboard_outcome`
+  and `clipboard_error`; `clipboard_available` describes transport availability,
+  and `clipboard_transport_busy` is global across all panes/workspaces. These
+  diagnostics contain no clipboard text and are not authorization capabilities.
+  `copied` means observed text was exported; `paste-dispatched` means native
+  dispatch, not DOM insertion. `no-update-observed` means no update was observed,
+  not proven cancellation: no OS write/success claim, but a NEW user command may
+  retry. Never automatically retry Cut. Genuine helper/seed/transport failure
+  disables page clipboard until app restart. Browser-free builds report unavailable.
+  Every explicit Paste snapshots fresh GPUI text (absent text differs from empty).
+  One app-global helper serializes page operations in an isolated, ephemeral CEF
+  context, without profile/cookie sharing, network access or permission grants.
+  Ownership changes abandon OS export and drain pending helper work. Payloads
+  stay bounded in process memory, with no text logging/history/disk persistence;
+  Paste data is not immediately scrubbed, preserving eligible consented reads.
+  Ordinary unattended website async/legacy clipboard reads are denied, including
+  activated reads outside explicit native Paste. Gesture writers and eligible
+  Paste-handler reads are normal consented behavior. Website `writeText()` uses
+  CEF's private buffer; a direct website-copy-button-to-OS bridge is not promised.
+  The OS clipboard itself is shared across normal workspaces.
   Context menus are trusted `browser_chrome` mod UI: clone the mod to customize
   link/selection/editable/address menus. No Chromium full/quick menu is shown.
   `browserState(pane).context` contains plain untrusted strings and a one-shot
@@ -701,8 +726,10 @@ The main ones:
   URL/error/workspace text must remain inert text: never eval, import, run commands
   from, or otherwise interpret page metadata as trusted instructions. The page
   renderer has no Herdr module, core connection or command bridge. A broken mod
-  reports its error; select `browser-chrome` again to recover. Tabs/context menus
-  and browser clipboard support are not part of this boundary yet. The shipped
+  reports its error; select `browser-chrome` again to recover. Browser tabs,
+  trusted context menus and bounded page-text clipboard commands use this boundary.
+  Put mouse listeners on a plain wrapper around `Input`, not the opaque Input
+  element itself. The shipped
   Pane menu entry uses `pane.menu`, respecting the layout's `terminal_menu`,
   custom dimensions and missing-mod fallback; the entry is customizable too.
 - Terminals: `terminal.open {argv?, folder?, place?, name?}` (`folder` sets the

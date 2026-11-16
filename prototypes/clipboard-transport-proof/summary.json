@@ -1,0 +1,48 @@
+{
+  "outcome": "runtime_missing_contract",
+  "evidence_root": "/home/firesquid/.cache/herdr-browser-prototype/clipboard-transport-proof",
+  "final_run": "/home/firesquid/.cache/herdr-browser-prototype/clipboard-transport-proof/evidence-1794809931978689706",
+  "assertion_cleanup_run": "/home/firesquid/.cache/herdr-browser-prototype/clipboard-transport-proof/evidence-1794809930522515433",
+  "semantic_repeats_final": 10,
+  "source_operations_final": 100,
+  "counts": {
+    "copy/default": 10,
+    "copy/custom": 10,
+    "copy/cancel": 10,
+    "copy/noselect": 10,
+    "cut/default": 10,
+    "cut/custom": 10,
+    "cut/cancel": 10,
+    "cut/noselect": 10,
+    "paste/default": 10,
+    "paste/cancel": 10
+  },
+  "copy_cut_cases_passed": 80,
+  "paste_exact_data_failures": 20,
+  "renderer_paste_empty_data_cause": "UNDETERMINED; no inference that a policy fix is needed",
+  "no_write_sentinel_suppressed": 40,
+  "wrong_owner_counterexamples": 4,
+  "wrong_owner_counterexample_scope": "mechanism-level controlled B native Copy interleaving; not a demonstrated bypass of a globally serialized app coordinator",
+  "combined_canceled_A_handler_website_write_case_run": false,
+  "unattended_read_denials": 2,
+  "activated_website_write": "ALLOWED, exact readback; normal behavior, not blocker",
+  "trusted_source_event_types": [
+    "beforeinput",
+    "copy",
+    "cut",
+    "input",
+    "paste"
+  ],
+  "clean_close_and_shutdown": true,
+  "assertion_clean_close_and_shutdown": true,
+  "remaining_owned_processes_snapshot": [],
+  "helper_classifier_identical_to_prior": true,
+  "source_hashes": {
+    "probe.rs": "4beaa058fe95c396d1d736ef66486157e9d9d3d7f8e4a23310766163e889def4",
+    "scenarios.rs": "f18f690ff4cb7caefad58c3b84cf2a809a824edbd44c39e6fcad35cd681a9bf3",
+    "arguments.rs": "94a093a3c89fbb357c1aebc8366680082645c907a6cbdd41ff3debc038a613eb",
+    "run.sh": "234eb58c08649d891108e1f3acaf8da35cf7bbeac27b2fb016cd9e1f7559936c"
+  },
+  "production_barrier": false,
+  "OS_clipboard_claim": false
+}

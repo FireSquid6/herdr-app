@@ -116,7 +116,7 @@ Focus and select the browser pane's address field.
 
 ## `browser.copy`
 
-Copy the focused browser address selection (page clipboard temporarily unavailable).
+Copy text from the focused browser page or address editor; page requests complete asynchronously.
 
 | Argument | Required |
 |---|---|
@@ -124,7 +124,7 @@ Copy the focused browser address selection (page clipboard temporarily unavailab
 
 ## `browser.cut`
 
-Cut the focused browser address selection (page clipboard temporarily unavailable).
+Cut text from the focused browser page or address editor; page requests complete asynchronously.
 
 | Argument | Required |
 |---|---|
@@ -132,7 +132,7 @@ Cut the focused browser address selection (page clipboard temporarily unavailabl
 
 ## `browser.paste`
 
-Paste into the focused browser address editor (page clipboard temporarily unavailable).
+Paste text into the focused browser page or address editor; page requests acknowledge dispatch, not insertion.
 
 | Argument | Required |
 |---|---|
