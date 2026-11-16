@@ -11,8 +11,13 @@ use serde_json::Value;
 #[serde(untagged)]
 pub enum Content {
     Terminal { terminal: String },
-    /// A browser pane. Only its last URL belongs to the layout document.
-    Browser { url: String },
+    /// Durable browser tabs, not live pages/history. `url` remains the selected
+    /// URL for compatibility with URL-only documents and older readers.
+    Browser {
+        url: String,
+        #[serde(default, skip_serializing_if = "crate::browser_tabs::BrowserTabs::is_empty")]
+        tabs: crate::browser_tabs::BrowserTabs,
+    },
     Mod {
         #[serde(rename = "mod")]
         name: String,

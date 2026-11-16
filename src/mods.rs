@@ -70,7 +70,7 @@ pub fn write_workspace() -> std::io::Result<()> {
         let _ = std::fs::remove_file(dir.join("CLAUDE.md"));
     }
     write_if_changed(&dir.join("herdr.d.ts"), DECLARATIONS)?;
-    let types = gpui_shell::type_declarations(&gpui_shell::FrozenComponentRegistry::default());
+    let types = gpui_shell::type_declarations(&crate::browser_chrome::components());
     write_if_changed(&dir.join("gpui-kit.d.ts"), &types)?;
     let _ = std::fs::remove_dir_all(frame_dir());
     for (path, bytes) in FRAME_MODS {
@@ -686,6 +686,12 @@ pub fn send_command_to(copy: u64, command: &str) -> bool {
     if !SHOWN_COPIES.with(|s| s.borrow().contains(&copy)) {
         return false;
     }
+    deliver_command_to(copy, command)
+}
+
+/// Owner lifecycle/state delivery, including hidden chrome copies. This is not
+/// exported to scripts: ordinary mod commands still require a shown copy.
+pub(crate) fn deliver_command_to(copy: u64, command: &str) -> bool {
     COMMANDS.with(|c| {
         let mut c = c.borrow_mut();
         c.retain(|(_, _, tx)| !tx.is_closed());
@@ -1088,6 +1094,7 @@ fn module(inst: Instance, copy: u64) -> HostModule {
             let reads = reads.clone();
             move |_| Ok(float.as_ref().map_or(HostValue::Null, |id| read(&reads, "floats", |s| s.floats.get(id).unwrap_or(&Value::Null))))
         })
+        .function("browserState", |a| Ok(to_host(&crate::browser_chrome::state(a.string(0)?))))
         .function("props", move |_| Ok(to_host(&props)))
         .function("shared", |a| {
             let k = a.string(0)?;
@@ -1317,6 +1324,8 @@ mod tests {
         assert!(hidden.is_empty());
         assert!(!send_command_to(3, "focus"));
         assert!(!send_command_to(99, "focus"));
+        assert!(deliver_command_to(3, "navigated"), "native owners can update hidden chrome without granting mod-command focus");
+        assert_eq!(hidden.try_recv().unwrap(), "navigated");
         // Existing mod key bindings still broadcast to every shown copy.
         assert!(send_command("same-mod", "existing-key"));
         assert_eq!(first.try_recv().unwrap(), "existing-key");

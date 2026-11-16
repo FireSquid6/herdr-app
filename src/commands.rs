@@ -29,6 +29,10 @@ const fn cmd(name: &'static str, args: &'static [Arg], about: &'static str) -> C
 
 pub const COMMANDS: &[Command] = &[
     // Browser commands stay discoverable on builds without the optional runtime.
+    cmd("browser.tab.new", &[opt("pane"), opt("url")], "Create and select a browser tab; defaults to the configured homepage."),
+    cmd("browser.tab.select", &[opt("pane"), req("tab")], "Select a browser tab without recreating its page."),
+    cmd("browser.tab.close", &[opt("pane"), opt("tab")], "Close a browser tab (selected by default); the last closes its pane."),
+    cmd("browser.tab.move", &[opt("pane"), req("tab"), req("index")], "Move a browser tab to a zero-based index within its pane."),
     cmd("browser.new", &[opt("url"), opt("place"), opt("space"), opt("pane")], "Open a browser pane (Linux browser feature only): place tab (default), right or down. URL defaults to browser_url; remote spaces are blocked."),
     cmd("browser.navigate", &[req("url"), opt("pane")], "Navigate a browser pane (default: focused) to a URL or search using browser_search."),
     cmd("browser.back", &[opt("pane")], "Go back in the browser pane's live session."),
@@ -48,6 +52,7 @@ pub const COMMANDS: &[Command] = &[
     cmd("tab.rename", &[opt("id"), opt("name")], "Rename a tab (asks the person when no name; an empty name: called by its number again)."),
     cmd("tab.move", &[req("id"), req("index")], "Move a tab to a position in its space (1 = first)."),
     cmd("pane.split", &[req("direction"), opt("pane"), opt("argv"), opt("mod"), opt("props")], "Split a pane (default: the focused one) \"right\" or \"down\" with a new terminal, or with a mod (`mod`, its `props`) beside it."),
+    cmd("pane.menu", &[opt("pane")], "Open the layout-selected pane menu (default: focused pane), including browser and unavailable panes."),
     cmd("pane.close", &[opt("pane")], "Close a pane and end its terminal."),
     cmd("terminal.open", &[opt("argv"), opt("folder"), opt("place"), opt("name")], "Start a terminal: as a new tab (place \"tab\", default), or \"right\"/\"down\" of the focused pane."),
     cmd("terminal.keep", &[req("terminal"), opt("place")], "Give a running terminal without a pane (a sub-agent) a pane: a new tab, or \"right\"/\"down\"."),
@@ -216,7 +221,7 @@ mod tests {
 
     #[test]
     fn malformed_targets_cannot_fall_back_to_the_current_work() {
-        for (name, arg) in [("tab.close", "id"), ("pane.close", "pane"), ("space.close", "id"), ("tab.new", "space"), ("terminal.show", "terminal"), ("pane.swap", "pane"), ("pane.swap", "target")] {
+        for (name, arg) in [("tab.close", "id"), ("pane.close", "pane"), ("pane.menu", "pane"), ("space.close", "id"), ("tab.new", "space"), ("terminal.show", "terminal"), ("pane.swap", "pane"), ("pane.swap", "target")] {
             let c = find(name).unwrap();
             for value in [json!(123), json!(false), json!([]), json!({"id": "target"})] {
                 let error = validate_args(c, &json!({arg: value})).unwrap_err();

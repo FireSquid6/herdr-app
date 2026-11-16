@@ -8,7 +8,12 @@ use std::sync::{
 
 #[derive(Clone, Default, PartialEq, Eq)]
 pub struct LoadStatus {
+    pub title: String,
+    pub favicon: super::favicon::FaviconState,
+    pub navigation_epoch: u64,
     pub loading: bool,
+    pub can_back: bool,
+    pub can_forward: bool,
     pub error: Option<String>,
     pub failed: bool,
 }
@@ -19,6 +24,7 @@ pub struct Callbacks {
     pub geometry: Mutex<Geometry>,
     pub ready: AtomicBool,
     pub closed: AtomicBool,
+    pub closing: AtomicBool,
     pub navigated: Mutex<Option<String>>,
     pub status: Mutex<LoadStatus>,
     pub hidden: AtomicBool,
@@ -72,11 +78,20 @@ wrap_life_span_handler! {
 wrap_load_handler! {
     pub struct Navigation { shared: Arc<Callbacks> }
     impl LoadHandler {
-        fn on_loading_state_change(&self, _browser: Option<&mut Browser>, loading: i32, _back: i32, _forward: i32) {
+        fn on_loading_state_change(&self, _browser: Option<&mut Browser>, loading: i32, back: i32, forward: i32) {
             tracing::info!(loading = loading != 0, "CEF loading state changed");
             if let Ok(mut status) = self.shared.status.lock() {
                 status.loading = loading != 0;
+                status.can_back = back != 0;
+                status.can_forward = forward != 0;
                 if loading != 0 { status.error = None; status.failed = false; }
+            }
+        }
+        fn on_load_start(&self, _browser: Option<&mut Browser>, frame: Option<&mut Frame>, _transition: TransitionType) {
+            if !frame.is_some_and(|frame|frame.is_main() == 1) { return; }
+            if let Ok(mut status) = self.shared.status.lock() {
+                status.navigation_epoch += 1;
+                retire_favicon(status.favicon.document_changed());
             }
         }
         fn on_load_error(&self, _browser: Option<&mut Browser>, frame: Option<&mut Frame>, code: Errorcode, text: Option<&CefString>, _url: Option<&CefString>) {
@@ -105,6 +120,87 @@ wrap_load_handler! {
                     }
                 }
             }
+        }
+    }
+}
+// Icon requests use this browser's host/RequestContext, never GPUI HTTP or a
+// global downloader. Only decoded, bounded PNG bytes become a local mod asset.
+fn retire_favicon(asset: Option<String>) {
+    if let Some(path) = asset { let _ = std::fs::remove_file(crate::mods::app_dir().join(path)); }
+}
+fn favicon_png(code: i32, image: Option<&mut Image>) -> Option<Vec<u8>> {
+    if !(200..300).contains(&code) { tracing::warn!(code, "favicon download returned non-success HTTP status"); return None; }
+    let Some(image) = image else { tracing::warn!(code, "favicon download returned no decoded image"); return None };
+    let (mut width, mut height) = (0, 0);
+    let Some(png) = image.as_png(1., 1, Some(&mut width), Some(&mut height)) else { tracing::warn!("favicon image could not encode a PNG representation"); return None };
+    tracing::info!(width, height, bytes = png.size(), "favicon decoded PNG representation");
+    if width <= 0 || height <= 0 || width > 64 || height > 64 || png.size() == 0 || png.size() > 65536 { return None; }
+    let mut bytes = vec![0; png.size()];
+    (png.data(Some(&mut bytes), 0) == bytes.len()).then_some(bytes)
+}
+wrap_download_image_callback! {
+    pub struct Favicon { shared: Arc<Callbacks>, request: super::favicon::FaviconRequest }
+    impl DownloadImageCallback {
+        fn on_download_image_finished(&self, _url: Option<&CefString>, code: i32, image: Option<&mut Image>) {
+            if self.shared.closing.load(Ordering::Acquire) || self.shared.closed.load(Ordering::Acquire) { return; }
+            let Ok(mut status) = self.shared.status.lock() else { return };
+            if !status.favicon.accepts(&self.request) { tracing::info!(code, "discarding stale favicon download reply"); return; }
+            tracing::info!(code, image = image.is_some(), "current favicon download completed");
+            let asset = favicon_png(code, image).and_then(|bytes| {
+                use std::hash::{Hash, Hasher};
+                let mut hash = std::collections::hash_map::DefaultHasher::new();
+                bytes.hash(&mut hash);
+                let path = format!("browser-favicons/{}-{:x}-{:x}.png", std::process::id(), Arc::as_ptr(&self.shared) as usize, hash.finish());
+                let root = crate::mods::app_dir();
+                if let Err(error) = std::fs::create_dir_all(root.join("browser-favicons")).and_then(|_|std::fs::write(root.join(&path), bytes)) {
+                    tracing::warn!(%error, "cannot write decoded native favicon asset"); return None;
+                }
+                tracing::info!(asset = %path, "native favicon asset installed");
+                Some(path)
+            });
+            // A current failed/decode-rejected download explicitly clears its
+            // icon. Old document/request replies never reach the asset writer.
+            if let Ok(retired) = status.favicon.complete(&self.request, asset.clone()) {
+                retire_favicon(retired.filter(|old|Some(old) != asset.as_ref()));
+            }
+        }
+    }
+}
+wrap_display_handler! {
+    pub struct Display { shared: Arc<Callbacks> }
+    impl DisplayHandler {
+        fn on_title_change(&self, _browser: Option<&mut Browser>, title: Option<&CefString>) {
+            if let Ok(mut status) = self.shared.status.lock() {
+                status.title = title.map(|t|t.to_string().chars().take(512).collect()).unwrap_or_default();
+            }
+        }
+        fn on_favicon_urlchange(&self, browser: Option<&mut Browser>, urls: Option<&mut CefStringList>) {
+            if self.shared.closing.load(Ordering::Acquire) || self.shared.closed.load(Ordering::Acquire) { return; }
+            // cef-rs 156's collection clone is read-only, but IntoIterator
+            // asks for a mutable handle and silently yields zero for clones.
+            // Move the callback's borrowed wrapper instead (not the CEF list's
+            // ownership); its replacement owns only a fresh empty wrapper.
+            let url = urls.and_then(|urls|std::mem::take(urls).into_iter().find(|url|url.starts_with("http://") || url.starts_with("https://")));
+            tracing::info!(browser_id = browser.as_ref().map(|b|b.identifier()), candidate = url.is_some(), "CEF favicon URL update");
+            let request = if let Ok(mut status) = self.shared.status.lock() {
+                let (request, retired) = status.favicon.request(url);
+                retire_favicon(retired);
+                request
+            } else { return };
+            let Some(request) = request else { return };
+            if let Some(host) = browser.and_then(|b|b.host()) {
+                let url = request.url.clone();
+                let mut callback = Favicon::new(self.shared.clone(), request);
+                tracing::info!(origin = %super::policy::diagnostic_origin(&url), "requesting favicon through owning CEF browser");
+                host.download_image(Some(&url.as_str().into()), 1, 32, 0, Some(&mut callback));
+            }
+        }
+    }
+}
+impl Drop for Callbacks {
+    fn drop(&mut self) {
+        if let Ok(status) = self.status.lock() {
+            if let Some(path) = &status.favicon.asset { let _ = std::fs::remove_file(crate::mods::app_dir().join(path)); }
         }
     }
 }
@@ -165,8 +261,9 @@ wrap_request_handler! {
     }
 }
 wrap_client! {
-    pub struct PageClient { pixels: RenderHandler, lifetime: LifeSpanHandler, navigation: LoadHandler, permissions: PermissionHandler, dialogs: DialogHandler, downloads: DownloadHandler, requests: RequestHandler }
+    pub struct PageClient { display: DisplayHandler, pixels: RenderHandler, lifetime: LifeSpanHandler, navigation: LoadHandler, permissions: PermissionHandler, dialogs: DialogHandler, downloads: DownloadHandler, requests: RequestHandler }
     impl Client {
+        fn display_handler(&self) -> Option<DisplayHandler> { Some(self.display.clone()) }
         fn render_handler(&self) -> Option<RenderHandler> { Some(self.pixels.clone()) }
         fn life_span_handler(&self) -> Option<LifeSpanHandler> { Some(self.lifetime.clone()) }
         fn load_handler(&self) -> Option<LoadHandler> { Some(self.navigation.clone()) }
@@ -217,6 +314,7 @@ wrap_app! {
 
 pub fn create(shared: Arc<Callbacks>, url: &str, context: &mut RequestContext) -> Option<Browser> {
     let mut client = PageClient::new(
+        Display::new(shared.clone()),
         Pixels::new(shared.clone()),
         Lifetime::new(shared.clone()),
         Navigation::new(shared),
@@ -250,5 +348,37 @@ pub fn text(host: &BrowserHost, text: &str) {
             unmodified_character: character,
             ..Default::default()
         }));
+    }
+}
+
+#[cfg(test)]
+mod tab_visibility_tests {
+    use super::*;
+    #[test]
+    fn favicon_callback_reads_the_original_cef_list_not_a_readonly_clone() {
+        let shared = Arc::new(Callbacks::default());
+        let display = Display::new(shared.clone());
+        let mut urls = CefStringList::new();
+        urls.append("http://127.0.0.1/owned/favicon.png");
+        display.on_favicon_urlchange(None, Some(&mut urls));
+        assert_eq!(shared.status.lock().unwrap().favicon.pending_url(), Some("http://127.0.0.1/owned/favicon.png"));
+        let mut empty = CefStringList::new();
+        display.on_favicon_urlchange(None, Some(&mut empty));
+        assert!(shared.status.lock().unwrap().favicon.pending_url().is_none());
+    }
+    #[test]
+    fn cef_hidden_paint_callback_never_copies_frames() {
+        let shared = Arc::new(Callbacks::default());
+        let pixels = Pixels::new(shared.clone());
+        let bytes = vec![0u8; 16];
+        pixels.on_paint(None, PaintElementType::VIEW, None, bytes.as_ptr().cast(), 2, 2);
+        assert_eq!(shared.mailbox.counts().0, 1);
+        shared.hidden.store(true, Ordering::Release);
+        for _ in 0..5 { pixels.on_paint(None, PaintElementType::VIEW, None, bytes.as_ptr().cast(), 2, 2); }
+        assert_eq!(shared.mailbox.counts().0, 1);
+        shared.hidden.store(false, Ordering::Release);
+        shared.mailbox.close();
+        pixels.on_paint(None, PaintElementType::VIEW, None, bytes.as_ptr().cast(), 2, 2);
+        assert_eq!(shared.mailbox.counts().0, 1);
     }
 }

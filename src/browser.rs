@@ -2,6 +2,7 @@
 //! this module is not a claim of a completed runtime sandbox/performance audit.
 mod arguments;
 mod bridge;
+mod favicon;
 mod pane;
 mod policy;
 mod surface;
@@ -238,6 +239,7 @@ impl Runtime {
         STATE.with_borrow(|state| {
             if let Some(state) = state {
                 for page in &state.pages {
+                    page.shared.closing.store(true, Ordering::Release);
                     page.shared.mailbox.close();
                     if let Some(host) = page.browser.host() {
                         host.close_browser(1);

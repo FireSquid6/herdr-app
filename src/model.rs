@@ -647,7 +647,7 @@ mod tests {
     #[test]
     fn browser_panes_split_focus_zoom_close_and_cannot_cross_spaces() {
         let mut m = model_with_one();
-        m.split_with("x1", Axis::Row, Node::block("web", Content::Browser { url: "https://example.com".into() }));
+        m.split_with("x1", Axis::Row, Node::block("web", Content::Browser { url: "https://example.com".into(), tabs: Default::default() }));
         assert_eq!(m.focused_pane().as_deref(), Some("web"));
         m.tab_of_mut("web").unwrap().zoomed = Some("web".into());
         m.focus_pane("x1");
@@ -657,6 +657,44 @@ mod tests {
         assert!(m.swap_panes("web", "other-pane").is_err());
         m.remove_pane("web");
         assert!(m.tab_of("web").is_none());
+    }
+
+    #[test]
+    fn mixed_splits_add_neighbors_without_replacing_or_moving_existing_content() {
+        for source_browser in [false, true] {
+            for new_browser in [false, true] {
+                for axis in [Axis::Row, Axis::Column] {
+                    let mut m = model_with_one();
+                    if source_browser {
+                        *m.tab_mut("c1").unwrap().root.find_mut("x1").unwrap() = Node::block("x1", Content::Browser { url: "https://source.invalid".into(), tabs: Default::default() });
+                    }
+                    let source = serde_json::to_value(m.tab("c1").unwrap().root.find("x1").unwrap().content()).unwrap();
+                    m.add_tab("p1", Tab::with_pane("existing-tab", "Existing browser",
+                        Node::block("existing-web", Content::Browser { url: "https://existing.invalid".into(), tabs: Default::default() })));
+                    // Split an explicitly targeted pane, not the currently focused tab.
+                    let existing = serde_json::to_value(&m.tab("existing-tab").unwrap().root).unwrap();
+                    m.tab_mut("c1").unwrap().zoomed = Some("x1".into());
+                    let new = if new_browser {
+                        Node::block("neighbor", Content::Browser { url: "https://new.invalid".into(), tabs: Default::default() })
+                    } else { pane("neighbor", "new-terminal") };
+                    assert!(m.split_with("x1", axis, new));
+                    let tab = m.tab("c1").unwrap();
+                    assert_eq!(tab.root.parent_of("neighbor").unwrap().axis(), Some(axis));
+                    assert_eq!(tab.root.panes().iter().map(|p| p.id.as_str()).collect::<Vec<_>>(), ["x1", "neighbor"]);
+                    assert_eq!(serde_json::to_value(tab.root.find("x1").unwrap().content()).unwrap(), source);
+                    assert_eq!(tab.focused.as_deref(), Some("neighbor"));
+                    assert!(tab.zoomed.is_none());
+                    assert_eq!(m.space_of("neighbor").unwrap().id, "p1");
+                    assert_eq!(serde_json::to_value(&m.tab("existing-tab").unwrap().root).unwrap(), existing);
+                    // Focus and close still act on ordinary panes; removing the neighbor
+                    // leaves the original content and the other tab untouched.
+                    assert!(m.focus_pane("neighbor"));
+                    m.remove_pane("neighbor");
+                    assert_eq!(serde_json::to_value(m.tab("c1").unwrap().root.find("x1").unwrap().content()).unwrap(), source);
+                    assert_eq!(serde_json::to_value(&m.tab("existing-tab").unwrap().root).unwrap(), existing);
+                }
+            }
+        }
     }
 
     #[test]

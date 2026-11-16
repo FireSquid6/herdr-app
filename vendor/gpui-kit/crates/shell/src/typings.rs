@@ -183,6 +183,8 @@ fn base_declarations() -> String {
 
 pub(crate) fn declarations_with_components(components: &crate::FrozenComponentRegistry) -> String {
     let (nullary, parametric) = style_methods();
+    // HERDR: a host catalog may use a module other than gpui-component.
+    let component_module = components.module_specifier().unwrap_or(crate::DEFAULT_COMPONENT_MODULE);
 
     let mut out = String::with_capacity(160 * 1024);
     out.push_str(&PREAMBLE.replace("{version}", crate::plugin::SHELL_VERSION));
@@ -207,7 +209,7 @@ pub(crate) fn declarations_with_components(components: &crate::FrozenComponentRe
     for descriptor in components.descriptors() {
         let _ = write!(
             out,
-            " | import(\"gpui-component\").{}Element",
+            " | import(\"{component_module}\").{}Element",
             descriptor.name()
         );
     }
@@ -232,7 +234,7 @@ pub(crate) fn declarations_with_components(components: &crate::FrozenComponentRe
     out.push_str(INLINE_TOKEN_TYPES);
     out.push_str(BASE);
     out.push_str("}\n\n");
-    out.push_str("declare module \"gpui-component\" {\n");
+    let _ = writeln!(out, "declare module \"{component_module}\" {{");
     out.push_str("  import { ClickEvent, Context, Element, NativeElement } from \"gpui-kit\";\n");
     out.push_str(INLINE_TOKEN_TYPES);
     for state in components.states() {
@@ -332,7 +334,13 @@ pub(crate) fn declarations_with_components(components: &crate::FrozenComponentRe
             );
             out.push_str("  export const ");
             out.push_str(constructor.export());
-            out.push_str(": { new(");
+            // HERDR: registered exports are callable functions; retain the
+            // existing construct signature as well as describing normal calls.
+            out.push_str(": { (");
+            push_arguments(&mut out, &constructor.arguments());
+            out.push_str("): ");
+            out.push_str(descriptor.name());
+            out.push_str("Element; new(");
             push_arguments(&mut out, &constructor.arguments());
             out.push_str("): ");
             out.push_str(descriptor.name());

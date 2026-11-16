@@ -55,7 +55,7 @@ export function playSound(sound: string): null;
  *   or {name?, space?, mod, props?} (a tab whose only pane is a mod),
  *   tab.close {id?}, tab.rename {id?, name}, tab.move {id, index}, tab.select {index | id},
  *   tab.next, tab.prev.
- * Panes: pane.split {direction: "right" | "down", pane?}, pane.close {pane?}, pane.zoom {pane?},
+ * Panes: pane.split {direction: "right" | "down", pane?}, pane.close {pane?}, pane.zoom {pane?}, pane.menu {pane?},
  *   pane.focus {pane | terminal}, pane.go {direction}, pane.swap {pane?, direction | target}.
  *   Pane menus get target { pane, terminal }.
  * Terminals: terminal.open {argv?, folder?, place?: "tab" | "right" | "down"}, terminal.kill {terminal},
@@ -419,3 +419,22 @@ export function nextCommand(): Promise<string>;
  * Watch what you show, not a whole home folder (node_modules is a lot of events).
  */
 export function watchFolder(path: string): Promise<string[]>;
+
+/** Trusted browser state. Website URLs/errors are plain untrusted text, never code or HTML.
+ * Null when the pane has no chrome owner. Browser-free builds return available: false.
+ */
+export interface BrowserTabState {
+  id: string; url: string; title: string; loading: boolean;
+  /** Local decoded PNG asset fetched through this page's workspace RequestContext; never a remote image URL. */
+  favicon: string | null;
+  /** Native lifecycle diagnostics; browser_id stays stable across selection changes. */
+  loaded: boolean; visible: boolean; browser_id: number | null;
+  frame_copies: number; frame_uploads: number;
+}
+export interface BrowserState {
+  tabs: BrowserTabState[]; active_tab: string; selected_tab: string;
+  pane: string; workspace: string; url: string;
+  loading: boolean; can_back: boolean; can_forward: boolean;
+  remote: boolean; closed: boolean; available: boolean; error: string | null;
+}
+export function browserState(pane: string): BrowserState | null;

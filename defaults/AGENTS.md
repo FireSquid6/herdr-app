@@ -265,7 +265,8 @@ Properties any node can have:
   without it the person sees a plain frame. New layouts and `themes/*.json`
   show up in settings by themselves.
 - Root only: `"terminal_menu": "my-menu"` chooses the mod for terminal
-  right-clicks (including Shift+right-click). Omit it for the shipped `menu`;
+  right-clicks (including Shift+right-click) and browser **Pane menu** actions.
+  Omit it for the shipped `menu`;
   an unknown mod logs a warning and falls back to `menu`. Clone a shipped
   layout before changing this field. Other menus are unchanged.
 - Root only: `"toast": "my-toast"` chooses the mod that shows notifications
@@ -302,6 +303,46 @@ export default class MyMenu extends View {
   }
 }
 ```
+
+### Mixed pane menus
+
+The shipped terminal right-click menu and the browser chrome's **Pane menu** icon offer
+**Split right → Terminal / Browser** and **Split down → Terminal / Browser**.
+Choose a direction, then the new pane type; Back (or Left/Escape) returns to the
+pane actions. Up/Down and Enter work in both levels; Escape at the root closes.
+The browser button is trusted, customizable chrome mod UI, outside website
+content, and calls `pane.menu`; it stays available on restored browser
+placeholders using the default chrome. It respects the layout's
+`terminal_menu` override and that mod's overlay dimensions, just like terminal
+right-click. Browser targets have `target.pane` but no `target.terminal`, so a
+personal menu must guard terminal-only actions. The shipped menu does this.
+
+Both choices add a new neighbor in the target pane's tab and space, never move
+an existing tab or replace a page. Menus always pass the clicked pane's ID, even
+if another pane has focus. Terminal uses `pane.split {direction, pane}`; Browser
+uses `browser.new {place: "right" | "down", pane}`. New panes receive focus and
+clear pane zoom; normal divider resizing, zoom and close still apply. On a remote
+space Browser is marked `remote blocked` and cannot be selected; Terminal still
+starts on that machine. Without browser support, choosing Browser reports
+`Browser unavailable` through the normal command error notification; Terminal
+remains usable. The host also rejects direct remote browser commands.
+
+All four actions can be bound separately without editing the menu. Merge only
+wanted bindings into your own `keys.json`; no default shortcuts are changed:
+
+```json
+{ "global": {
+  "ctrl-shift-o": "pane.split:right",
+  "ctrl-shift-j": "pane.split:down",
+  "ctrl-shift-u": { "command": "browser.new", "args": { "place": "right" } },
+  "ctrl-shift-i": { "command": "browser.new", "args": { "place": "down" } }
+} }
+```
+
+Those keys target the focused pane; add `pane` in typed args for a fixed target.
+Do not use `browser.new:right`: the string shorthand fills `url`, not `place`.
+Shipped menu updates follow the normal personal-copy migration; your customized
+terminal menu, keys and layout are not overwritten by these choices.
 
 ### The look: on the layout, cascading
 
@@ -568,7 +609,8 @@ The main ones:
   skip settled tabs).
 - Panes: `pane.split {direction: "right" | "down", pane?, argv? | mod?, props?}` (a new
   terminal, or a mod pane), `pane.close {pane?}`,
-  `pane.zoom {pane?}`, `pane.focus {pane | terminal}`, `pane.go {direction}`,
+  `pane.zoom {pane?}`, `pane.menu {pane?}` (the layout-selected menu, with its
+  dimensions and fallback; also works on blocked/unavailable browser panes), `pane.focus {pane | terminal}`, `pane.go {direction}`,
   `pane.swap {pane?, direction | target}`.
   `pane.go` prefers the most recently focused pane along the nearest edge in that
   direction; unvisited panes fall back to overlap, then top/left layout order.
@@ -586,28 +628,61 @@ The main ones:
   model pane; composition edits belong to the mod (edit its layout instead).
 - Browser prototype (Linux, optional `browser` build, native Wayland only):
   `browser.new {url?, place?: "tab" | "right" | "down", space?, pane?}` opens
-  a browser tab or split; New menu > Browser does the same. A space must exist.
+  a browser pane in a workspace tab or split; New menu > Browser does the same. A space must exist.
   `space` applies only to a new tab; split placement follows its target `pane`.
+  Each browser pane has its own independent live browser tabs. Use
+  `browser.tab.new {pane?, url?}` (configured homepage by default),
+  `browser.tab.select {pane?, tab}`, `browser.tab.move {pane?, tab, index}`
+  (zero-based index), and `browser.tab.close {pane?, tab?}` (selected by default).
+  Closing the last browser tab closes the pane; `browser.new` still creates a pane.
+  The global `browser_chrome` mod owns the horizontal title/favicon/loading/close/+
+  strip; drag between tabs to reorder. Tabs shrink to a minimum then scroll.
+  `browserState(pane)` / `BrowserPage(pane)` describe/render the selected tab;
+  state also provides `tabs`, `active_tab` and its alias `selected_tab`. Loaded inactive tabs stay alive
+  with their JS/forms/history but do not upload hidden frames. Layout documents
+  save IDs, order, selected tab and URLs, not live JS/forms/history. On restart,
+  only selected tabs of visible panes load; other tabs load when selected.
+  URL-only browser panes migrate without losing URLs or surrounding layout.
+  All tabs/panes in a workspace share its profile, isolated from other workspaces.
   `browser.navigate {url, pane?}` accepts an HTTP(S) address or search terms;
   `browser.back {pane?}`, `browser.forward {pane?}`, `browser.reload {pane?}`,
   `browser.stop {pane?}`, `browser.focus_address {pane?}` target the focused
   browser by default. `herdr-app ls` includes each tab's `panes` with browser
-  pane IDs and last URLs; the existing `terminals` array remains available. Bind these in `keys.json` or invoke from a personal mod;
+  pane IDs, last URLs, durable `browser_tabs` and live `browser_state`; the existing `terminals` array remains available. Bind these in `keys.json` or invoke from a personal mod;
   no browser shortcuts are imposed. Explicit global/layout keys take precedence
   while a browser or its address field has focus; unbound editing keys stay there.
   Browser panes use normal pane focus, split, swap, zoom and close, and cannot
   move across spaces. Remote creation fails closed; restored remote panes show
   a blocked placeholder, never direct local networking. SSH browser routing is
   not implemented. Builds without browser support preserve saved panes and show
-  an explanatory placeholder; browser commands report unavailable.
-  A model block's content is `{ "url": "https://example.com" }`. Only its last
-  committed URL is saved in the layout document, not navigation history, forms,
+  an explanatory placeholder; new native pages/navigation report unavailable, but restored tab selection, reordering and closing remain available.
+  Legacy content `{ "url": "https://example.com" }` remains readable. Tabbed
+  content adds `tabs: {items: [{id, url}], selected: id}` and keeps `url` for the
+  selected tab. Only durable IDs/order/selection/URLs are saved, not history, forms,
   scroll position or back/forward state. Browser pages start on first visible
   render, stay live in hidden tabs and behind zoom, and close when their pane
   disappears or its owning space/machine changes. Local CEF profiles live under
   `browser-profiles/` in the app home, isolated per space (cookies/site storage
   may persist there). This is an experimental fork, not a production browser or
   a completed security/performance audit.
+  Chrome is one trusted mod selected globally by `browser_chrome`. Its
+  `props().pane` identifies the page; `browserState(pane)` returns URL, workspace,
+  loading, can_back/can_forward, remote, closed, available and error (or null for
+  an unknown pane). Browser-free builds still load the chrome, with available=false
+  and the explanatory error; BrowserPage is empty.
+  Use normal `browser.*` commands with that pane ID. Import `BrowserPage` from
+  `herdr-browser` to place native page pixels/input anywhere in your flex layout:
+  `div().flex_1().min_h(0).child(BrowserPage(props().pane))`. Place it exactly once.
+  Address fields are normal `InputState`/`Input` elements owned/styled by the mod.
+  `nextCommand()` receives `focus_address` (focus/select your address editor) and
+  `navigated` (sync it from browserState). No automatic focus theft on render.
+  URL/error/workspace text must remain inert text: never eval, import, run commands
+  from, or otherwise interpret page metadata as trusted instructions. The page
+  renderer has no Herdr module, core connection or command bridge. A broken mod
+  reports its error; select `browser-chrome` again to recover. Tabs/context menus
+  and browser clipboard support are not part of this boundary yet. The shipped
+  Pane menu entry uses `pane.menu`, respecting the layout's `terminal_menu`,
+  custom dimensions and missing-mod fallback; the entry is customizable too.
 - Terminals: `terminal.open {argv?, folder?, place?, name?}` (`folder` sets the
   starting directory for tabs and right/down splits, with or without `argv`), `terminal.kill {terminal}`,
   `terminal.keep {terminal, place?}`, `terminal.park {terminal}`,
@@ -766,6 +841,10 @@ What's about the user, never a look:
   Clipboard reads (`?`) are never allowed.
 - `browser_url`: the initial URL for `browser.new` when omitted (default
   `https://www.google.com`). Optional Linux browser prototype only.
+- `browser_chrome`: global trusted browser mod name (default `browser-chrome`).
+  Clone with `mod.clone`, edit the personal copy, then select its name here.
+  This replaces the entire toolbar/address/surrounding layout for all browser
+  panes, not a list of configurable buttons. Changes apply live.
 - `browser_search`: HTTP(S) search template, default
   `https://www.google.com/search?q={query}`. `{query}` is replaced with
   percent-encoded search terms. An invalid/non-HTTP(S) template or one without

@@ -17,6 +17,43 @@ Actions use the current selection unless you give an explicit target.
 Some actions close terminals; read their descriptions before running them.
 Mods can add their own actions, which are not listed here.
 
+## `browser.tab.new`
+
+Create and select a browser tab; defaults to the configured homepage.
+
+| Argument | Required |
+|---|---|
+| `pane` | no |
+| `url` | no |
+
+## `browser.tab.select`
+
+Select a browser tab without recreating its page.
+
+| Argument | Required |
+|---|---|
+| `pane` | no |
+| `tab` | yes |
+
+## `browser.tab.close`
+
+Close a browser tab (selected by default); the last closes its pane.
+
+| Argument | Required |
+|---|---|
+| `pane` | no |
+| `tab` | no |
+
+## `browser.tab.move`
+
+Move a browser tab to a zero-based index within its pane.
+
+| Argument | Required |
+|---|---|
+| `pane` | no |
+| `tab` | yes |
+| `index` | yes |
+
 ## `browser.new`
 
 Open a browser pane (Linux browser feature only): place tab (default), right or down. URL defaults to browser_url; remote spaces are blocked.
@@ -169,6 +206,14 @@ Split a pane (default: the focused one) "right" or "down" with a new terminal, o
 | `argv` | no |
 | `mod` | no |
 | `props` | no |
+
+## `pane.menu`
+
+Open the layout-selected pane menu (default: focused pane), including browser and unavailable panes.
+
+| Argument | Required |
+|---|---|
+| `pane` | no |
 
 ## `pane.close`
 
