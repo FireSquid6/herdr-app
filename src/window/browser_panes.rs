@@ -106,6 +106,24 @@ impl AppWindow {
     }
 
     pub(super) fn render_browser(&self, pane: &str, cx: &mut Context<Self>) -> AnyElement {
+        // App-owned pane actions stay outside the web surface and the browser's
+        // navigation chrome, including in browser-free builds/restored panes.
+        let target = pane.to_owned();
+        let menu = div().id(SharedString::from(format!("browser-pane-menu-{pane}"))).px(settings::z(8.)).cursor_pointer()
+            .hover(|s| s.bg(c("hover")))
+            .on_click(cx.listener(move |this, _, window, cx| {
+                cx.stop_propagation();
+                this.open_menu("pane", json!({ "pane": target }), None, window, cx);
+            }))
+            .child("Pane ⋯");
+        div().size_full().flex().flex_col()
+            .child(div().h(settings::z(24.)).flex_none().flex().items_center().justify_end()
+                .bg(c("chrome")).text_color(c("muted")).text_size(settings::z(12.)).child(menu))
+            .child(div().flex_1().min_h_0().child(self.render_browser_surface(pane, cx)))
+            .into_any_element()
+    }
+
+    fn render_browser_surface(&self, pane: &str, cx: &mut Context<Self>) -> AnyElement {
         let pane = pane.to_owned();
         #[cfg(all(feature = "browser", target_os = "linux"))]
         if let Some(slot) = self.browsers.get(&pane) {
@@ -119,7 +137,7 @@ impl AppWindow {
                 cx.notify();
             })).child(slot.view.clone()).into_any_element();
         }
-        let _ = cx;
+        let _ = (pane, cx);
         div().size_full().flex().items_center().justify_center().text_color(c("dim"))
             .child("Browser unavailable: requires the optional Linux browser build and runtime.").into_any_element()
     }

@@ -915,6 +915,15 @@ fn local_state_and_overlay_initial_descriptions(cx: &mut TestAppContext) {
         let expected = if query == "settings" { "Settings" } else { "Nothing matches" };
         assert!(tree.contains(expected), "palette query {query}: {tree}");
     }
+    // Mixed split submenus render through the native JS bridge for either source.
+    for terminal in [json!("t1"), Value::Null] {
+        for direction in ["right", "down"] {
+            let tree = describe(cx, &staged, "mods/menu", true,
+                json!({"tab":"pane","target":{"pane":"p1","terminal":terminal},"overlay":"o1"}),
+                updates("current", "current"), Some(&format!("this.direction = {direction:?};"))).unwrap();
+            assert!(tree.contains("Terminal") && tree.contains("Browser"), "mixed split {direction}: {tree}");
+        }
+    }
     // Reviewed overlay contract table, not extracted from arbitrary JS call sites.
     let scenarios = [
         ("mods/menu", json!({"tab":"pane","target":{"pane":"p1","terminal":"t1"}})),
