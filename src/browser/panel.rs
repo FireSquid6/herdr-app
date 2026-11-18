@@ -1,5 +1,11 @@
 //! Thin native Stage A panel, consuming core-owned browser wire revision 2.
 use super::*;
+
+mod address_menu;
+pub mod clipboard;
+pub mod context_menu;
+mod runtime;
+mod groups;
 use crate::hc::Core;
 use gpui::{prelude::*, *};
 use serde_json::{Value, json};
@@ -18,6 +24,7 @@ use std::{
 enum Phase {
     #[default]
     Starting,
+    Detached,
     Running,
     Blocked,
     Revoked,
@@ -29,8 +36,13 @@ enum Phase {
 struct Snapshot {
     phase: Phase,
     generation: String,
+    browser_pid: u32,
+    instance: String,
+    group: String,
+    selected_tab: String,
     selected: String,
     tabs: Vec<Value>,
+    confirmed_metadata: Value,
     page: Option<Arc<RenderImage>>,
     devtools: Option<Arc<RenderImage>>,
     error: String,
@@ -43,27 +55,84 @@ struct Snapshot {
     revision: u64,
     metadata_revision: u64,
     input_pending: u64,
+    source_epoch: u64,
+    clipboard_capable: bool,
+    clipboard_poisoned: bool,
+    clipboard_error: String,
+    clipboard_outcome: &'static str,
+    clipboard_completion: Option<clipboard::Completion>,
+    context_capable: bool,
+    context_error: &'static str,
+    context_completion: Option<context_menu::Completion>,
 }
 impl Snapshot {
     fn tabs(&mut self, tabs: Value) {
+        if !self.group.is_empty() && tabs["group"].as_str() != Some(self.group.as_str()) { return; }
         let revision = tabs["revision"].as_u64().unwrap_or(0);
         if revision < self.metadata_revision {
             return;
         }
         self.metadata_revision = revision;
-        let selected = tabs["selected"].as_str().unwrap_or_default().to_owned();
-        if selected != self.selected {
+        self.confirmed_metadata = tabs.clone();
+        let selected_tab = tabs["selected"].as_str().unwrap_or_default().to_owned();
+        let entries = tabs["tabs"].as_array().cloned().unwrap_or_default();
+        let selected = if tabs["group"].is_string() {
+            entries.iter().find(|tab| tab["id"] == selected_tab)
+                .map(Self::entry_target).unwrap_or_default().to_owned()
+        } else { selected_tab.clone() };
+        let next_url = entries.iter().find(|tab| tab["id"] == selected_tab)
+            .and_then(|tab| tab["url"].as_str()).unwrap_or_default();
+        if selected != self.selected || selected_tab != self.selected_tab || self.selected_url() != next_url {
+            self.source_epoch += 1;
             self.page = None;
             self.devtools = None;
             self.tools_open = false;
         }
+        self.group = tabs["group"].as_str().unwrap_or_default().to_owned();
+        self.selected_tab = selected_tab;
         self.selected = selected;
         // A queued follow may be cancelled by a rapid return to the retained
         // frontend. Resume that exact surface and its ACK, not a new epoch.
         self.tools_open = self.tools_wanted
             && !self.tools_target.is_empty()
             && self.selected == self.tools_target;
-        self.tabs = tabs["tabs"].as_array().cloned().unwrap_or_default();
+        self.tabs = entries;
+        self.revision += 1;
+    }
+
+    fn entry_target(tab: &Value) -> &str {
+        match tab.get("target") {
+            Some(target) => target.as_str().unwrap_or_default(),
+            None => tab["id"].as_str().unwrap_or_default(),
+        }
+    }
+    fn owns_target(&self, target: &str) -> bool {
+        !target.is_empty() && self.tabs.iter().any(|tab| Self::entry_target(tab) == target)
+    }
+    fn selected_url(&self) -> &str {
+        self.tabs.iter().find(|tab| tab["id"] == self.selected_tab)
+            .and_then(|tab| tab["url"].as_str()).unwrap_or_default()
+    }
+
+    fn observed_stop(&mut self) {
+        if self.phase == Phase::Stopped { return; }
+        self.phase = Phase::Stopped;
+        self.ready = false;
+        self.clipboard_poisoned = false;
+        self.page = None;
+        self.devtools = None;
+        self.tools_open = false;
+        self.error = "Stopped. Profile retained; live drafts and JavaScript memory were lost.".into();
+        self.revision += 1;
+    }
+
+    fn observation_failed(&mut self, phase: Phase, error: String) {
+        if !self.ready { return; }
+        self.ready = false;
+        self.phase = phase;
+        self.error = error;
+        self.page = None;
+        self.devtools = None;
         self.revision += 1;
     }
 
@@ -106,13 +175,41 @@ struct Command {
     params: Value,
     /// Internal scheduling flag, never a new wire method.
     follow: bool,
+    clipboard: Option<clipboard::Request>,
+    context: Option<context_menu::Request>,
+}
+
+#[derive(Clone)]
+pub struct GroupConfig {
+    pub id: String,
+    pub saved: super::saved::SavedGroup,
+}
+pub struct Config {
+    pub workspace: String,
+    pub machine: String,
+    pub viewer: Arc<super::viewer::Viewer>,
+    pub group: Option<GroupConfig>,
+    pub attached: bool,
+    pub visible: bool,
 }
 
 pub struct Panel {
+    pane: String,
+    page_view: Entity<super::chrome::NativePage>,
+    chrome: Option<Entity<gpui_shell::ShellRoot>>,
+    chrome_copy: u64,
+    chrome_runtime: Option<Rc<gpui_shell::ShellRuntime>>,
     workspace: String,
     machine: String,
+    viewer: Arc<super::viewer::Viewer>,
+    group: Option<GroupConfig>,
     shared: Arc<Mutex<Snapshot>>,
     visible: Arc<AtomicBool>,
+    closed: Arc<AtomicBool>,
+    pending_clipboard: Option<clipboard::Pending>,
+    context_menu: Option<context_menu::Menu>,
+    context_pressed: Option<context_menu::RightPress>,
+    _clipboard_focus: Vec<Subscription>,
     commands: mpsc::SyncSender<Command>,
     focus: FocusHandle,
     page_bounds: Rc<Cell<Bounds<Pixels>>>,
@@ -131,440 +228,82 @@ pub struct Panel {
 }
 
 impl Panel {
-    pub fn new(workspace: String, machine: String, cx: &mut Context<Self>) -> Self {
-        Self::start(workspace, machine, false, None, cx)
+    pub fn new(workspace: String, machine: String, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        Self::with_viewer(workspace, machine, Arc::default(), window, cx)
     }
-    fn start(
-        workspace: String,
-        machine: String,
-        force: bool,
-        previous: Option<mpsc::Receiver<()>>,
-        cx: &mut Context<Self>,
-    ) -> Self {
-        let (finished_tx, finished) = mpsc::channel();
-        let shared = Arc::new(Mutex::new(Snapshot::default()));
-        let visible = Arc::new(AtomicBool::new(true));
-        let (commands, rx) = mpsc::sync_channel::<Command>(128);
-        let state = shared.clone();
-        let shown = visible.clone();
-        let ws = workspace.clone();
-        let host = machine.clone();
-        let worker_commands = commands.clone();
-        std::thread::spawn(move || {
-            let result = (|| -> Result<()> {
-                if let Some(previous) = previous {
-                    if matches!(
-                        previous.recv_timeout(Duration::from_secs(30)),
-                        Err(mpsc::RecvTimeoutError::Timeout)
-                    ) {
-                        bail!("Previous viewer has not disconnected; retry explicitly");
-                    }
-                }
-                if !host.is_empty() {
-                    bail!(
-                        "Remote browser needs a dedicated authenticated viewer connection to {host}; local fallback is forbidden"
-                    );
-                }
-                let core = Core::connect_browser()?;
-                let negotiated = core.call("browser.negotiate", json!({"revision":2,"client":"herdr-native"}))
-                    .map_err(|e| anyhow::anyhow!("Workspace browser unsupported: enable HC_BROWSER_CHROME on a revision-2 core ({e:#})"))?;
-                if negotiated["revision"] != 2 {
-                    bail!("Unsupported browser wire revision");
-                }
-                core.call_timeout(
-                    "browser.ensure",
-                    json!({"workspace":ws}),
-                    Duration::from_secs(60),
-                )?;
-                let acquired = core.call(
-                    "browser.acquire",
-                    json!({"workspace":ws,"force":force,"confirmed":force}),
-                )?;
-                let generation = acquired["generation"]
-                    .as_str()
-                    .ok_or_else(|| anyhow::anyhow!("Missing controller generation"))?
-                    .to_owned();
-                let lease = json!({"workspace":ws,"generation":generation});
-                let tabs = core.call("browser.tabs", lease.clone())?;
-                {
-                    let mut s = state.lock().unwrap();
-                    s.generation = generation.clone();
-                    s.ready = true;
-                    s.phase = Phase::Running;
-                    s.tabs(tabs);
-                }
-                let frame_core = core.clone();
-                let frame_state = state.clone();
-                let frame_lease = lease.clone();
-                let frame_host = host.clone();
-                let frame_ws = ws.clone();
-                let follow_commands = worker_commands;
-                // Exactly one capture/decode in flight per surface. Control RPCs run
-                // on the other thread and do not wait for image decompression.
-                let frames = std::thread::spawn(move || {
-                    let mut acknowledgements =
-                        std::collections::HashMap::<(String, usize, u64), SurfaceState>::new();
-                    let mut heartbeat = Instant::now();
-                    let mut metadata = Instant::now();
-                    loop {
-                        if !frame_state.lock().unwrap().ready {
-                            break;
-                        }
-                        if heartbeat.elapsed() > Duration::from_secs(5) {
-                            match frame_core.call("browser.heartbeat", frame_lease.clone()) {
-                                Ok(reply) => {
-                                    let mut s = frame_state.lock().unwrap();
-                                    s.input_pending = reply["input_pending"].as_u64().unwrap_or(0);
-                                    if let Some(errors) =
-                                        reply["input_errors"].as_array().filter(|e| !e.is_empty())
-                                    {
-                                        s.error = format!(
-                                            "Input completion failed (controller retained): {}",
-                                            errors
-                                                .iter()
-                                                .map(|e| format!(
-                                                    "receipt {}: {}",
-                                                    e["receipt"],
-                                                    e["message"].as_str().unwrap_or("input failed")
-                                                ))
-                                                .collect::<Vec<_>>()
-                                                .join("; ")
-                                        );
-                                    }
-                                    s.revision += 1;
-                                }
-                                Err(e) => {
-                                    let mut s = frame_state.lock().unwrap();
-                                    s.error = format!("Controller disconnected/revoked: {e:#}");
-                                    s.ready = false;
-                                    s.phase = Phase::Revoked;
-                                    s.page = None;
-                                    s.devtools = None;
-                                    s.revision += 1;
-                                    break;
-                                }
-                            }
-                            heartbeat = Instant::now();
-                        }
-                        if !shown.load(Ordering::Relaxed) {
-                            std::thread::park_timeout(Duration::from_millis(100));
-                            continue;
-                        }
-                        if metadata.elapsed() > Duration::from_secs(1) {
-                            if let Ok(tabs) = frame_core.call("browser.tabs", frame_lease.clone()) {
-                                let mut s = frame_state.lock().unwrap();
-                                if s.ready && s.generation == generation {
-                                    s.tabs(tabs);
-                                }
-                            }
-                            metadata = Instant::now();
-                        }
-                        let (target, tools, ready, tools_epoch) = {
-                            let s = frame_state.lock().unwrap();
-                            (s.selected.clone(), s.tools_open, s.ready, s.tools_epoch)
-                        };
-                        if !ready {
-                            break;
-                        }
-                        {
-                            let s = frame_state.lock().unwrap();
-                            acknowledgements.retain(|(id, kind, epoch), _| {
-                                (*kind == 0 || *epoch == tools_epoch)
-                                    && s.tabs.iter().any(|t| t["id"] == *id)
-                            });
-                        }
-                        if target.is_empty() {
-                            std::thread::park_timeout(Duration::from_millis(100));
-                            continue;
-                        }
-                        {
-                            let mut s = frame_state.lock().unwrap();
-                            if s.needs_follow(&target) {
-                                s.tools_requested_target = target.clone();
-                                if follow_commands
-                                    .try_send(Command {
-                                        method: "browser.devtools.open",
-                                        params: json!({"target":target}),
-                                        follow: true,
-                                    })
-                                    .is_err()
-                                {
-                                    s.tools_requested_target.clear();
-                                    s.error = "DevTools follow queue full".into();
-                                    s.revision += 1;
-                                }
-                            }
-                        }
-                        for index in 0..if tools { 2 } else { 1 } {
-                            let ack_key = (
-                                target.clone(),
-                                index,
-                                if index == 1 { tools_epoch } else { 0 },
-                            );
-                            let identity = Identity {
-                                machine: frame_host.clone(),
-                                workspace: frame_ws.clone(),
-                                target: target.clone(),
-                                generation: generation.clone(),
-                                devtools: index == 1,
-                            };
-                            let tracker =
-                                acknowledgements.entry(ack_key.clone()).or_insert_with(|| {
-                                    SurfaceState {
-                                        identity: Some(identity.clone()),
-                                        consumed: 0,
-                                    }
-                                });
-                            let ack = tracker.consumed;
-                            let mut p = frame_lease.clone();
-                            p["surface"] = json!({"kind":if index == 1 {"devtools"} else {"page"},"target":target});
-                            p["ack"] = ack.into();
-                            let result = frame_core.call("browser.frame", p).and_then(|r| {
-                                if r["generation"] != identity.generation {
-                                    bail!("Stale frame generation");
-                                }
-                                let sequence = r["sequence"]
-                                    .as_u64()
-                                    .ok_or_else(|| anyhow::anyhow!("Missing frame sequence"))?;
-                                if sequence <= ack {
-                                    bail!("Nonmonotonic frame sequence");
-                                }
-                                let image = decode_event(&r["event"])?;
-                                Ok((sequence, image))
-                            });
-                            let mut s = frame_state.lock().unwrap();
-                            // Even when a visible selection changes during decode, the
-                            // original surface consumed this sequence. Retain its ACK,
-                            // never transfer it to the newly selected target/generation.
-                            if s.generation == identity.generation && s.ready {
-                                if let Ok((sequence, _)) = &result {
-                                    tracker.commit(&identity, *sequence);
-                                }
-                            }
-                            if !s.ready || s.generation != identity.generation {
-                                tracker.revoke();
-                            }
-                            if s.selected != identity.target
-                                || s.generation != identity.generation
-                                || !s.ready
-                                || (index == 1 && s.tools_epoch != tools_epoch)
-                            {
-                                continue;
-                            }
-                            match result {
-                                Ok((sequence, image)) => {
-                                    if s.error.starts_with("Frame:") {
-                                        s.error.clear();
-                                    }
-                                    let _ = sequence;
-                                    if shown.load(Ordering::Relaxed) {
-                                        if index == 0 {
-                                            s.page = Some(image);
-                                        } else if s.tools_open {
-                                            s.devtools = Some(image);
-                                        }
-                                    }
-                                    s.revision += 1;
-                                }
-                                Err(e) => {
-                                    if matches!(
-                                        crate::hc::error_kind(&e),
-                                        Some("not_owner" | "stale_generation")
-                                    ) {
-                                        s.phase = Phase::Revoked;
-                                        s.ready = false;
-                                        s.page = None;
-                                        s.devtools = None;
-                                    }
-                                    s.error = format!("Frame: {e:#}");
-                                    s.revision += 1;
-                                }
-                            }
-                        }
-                        std::thread::park_timeout(Duration::from_millis(100));
-                    }
-                });
-                for cmd in rx {
-                    // Explicit reconnect/stop cancels queued work, not merely UI
-                    // commits. Never execute old target input after replacement.
-                    if !state.lock().unwrap().ready {
-                        break;
-                    }
-                    if cmd.follow {
-                        let mut s = state.lock().unwrap();
-                        if !s.accept_follow(cmd.params["target"].as_str().unwrap_or_default()) {
-                            continue;
-                        }
-                    }
-                    let mut params = lease.clone();
-                    if let Some(values) = cmd.params.as_object() {
-                        for (k, v) in values {
-                            params[k] = v.clone();
-                        }
-                    }
-                    if cmd.method == "browser.devtools.open" {
-                        let previous = state.lock().unwrap().tools_target.clone();
-                        if !previous.is_empty() && params["target"] != previous {
-                            let mut close = lease.clone();
-                            close["target"] = previous.into();
-                            if let Err(e) = core.call("browser.devtools.close", close) {
-                                if crate::hc::error_kind(&e) != Some("not_found") {
-                                    let mut s = state.lock().unwrap();
-                                    s.error = format!("DevTools close failed: {e:#}");
-                                    s.revision += 1;
-                                    continue;
-                                }
-                            }
-                        }
-                    }
-                    if cmd.method == "browser.devtools.close" {
-                        let previous = state.lock().unwrap().tools_target.clone();
-                        if !previous.is_empty() {
-                            params["target"] = previous.into();
-                        }
-                    }
-                    let requested_target = params["target"].as_str().unwrap_or_default().to_owned();
-                    match core.call(cmd.method, params) {
-                        Ok(reply) => {
-                            if cmd.method == "browser.stop" && reply["state"] != "stopped" {
-                                let mut s = state.lock().unwrap();
-                                s.error = "Browser exit was not observed; session remains attached"
-                                    .into();
-                                s.revision += 1;
-                                continue;
-                            }
-                            if cmd.method == "browser.stop" {
-                                let mut s = state.lock().unwrap();
-                                s.phase = Phase::Stopped;
-                                s.ready = false;
-                                s.page = None;
-                                s.devtools = None;
-                                s.tools_open = false;
-                                s.error="Stopped. Profile retained; live drafts and JavaScript memory were lost.".into();
-                                s.revision += 1;
-                                break;
-                            }
-                            {
-                                let mut s = state.lock().unwrap();
-                                if s.error.starts_with(cmd.method) {
-                                    s.error.clear();
-                                    s.revision += 1;
-                                }
-                            }
-                            if cmd.method == "browser.devtools.open" {
-                                let mut s = state.lock().unwrap();
-                                s.tools_opened(requested_target, cmd.follow);
-                            }
-                            if cmd.method == "browser.devtools.close" {
-                                let mut s = state.lock().unwrap();
-                                s.tools_open = false;
-                                s.tools_wanted = false;
-                                s.tools_target.clear();
-                                s.tools_requested_target.clear();
-                                s.devtools = None;
-                            }
-                            if cmd.method != "browser.input" && cmd.method != "browser.viewport" {
-                                if let Ok(tabs) = core.call("browser.tabs", lease.clone()) {
-                                    let mut s = state.lock().unwrap();
-                                    s.tabs(tabs);
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            let mut s = state.lock().unwrap();
-                            if matches!(
-                                crate::hc::error_kind(&e),
-                                Some("not_owner" | "stale_generation")
-                            ) {
-                                s.phase = Phase::Revoked;
-                                s.ready = false;
-                                s.page = None;
-                                s.devtools = None;
-                            }
-                            s.error = format!("{}: {e:#}", cmd.method);
-                            s.revision += 1;
-                        }
-                    }
-                }
-                {
-                    state.lock().unwrap().ready = false;
-                }
-                let _ = core.call("browser.release", lease);
-                let _ = frames.join();
-                Ok(())
-            })();
-            if let Err(e) = result {
-                let mut s = state.lock().unwrap();
-                s.phase = if crate::hc::error_kind(&e) == Some("owned") {
-                    Phase::Blocked
-                } else {
-                    Phase::Failed
-                };
-                s.error = format!("{e:#}");
-                s.revision += 1;
-            }
-            let _ = finished_tx.send(());
-        });
-        let refresh = cx.spawn(async move |this, cx| {
-            loop {
-                cx.background_executor()
-                    .timer(Duration::from_millis(100))
-                    .await;
-                if this
-                    .update(cx, |this, cx| {
-                        let revision = this.shared.lock().unwrap().revision;
-                        if revision != this.seen {
-                            this.seen = revision;
-                            cx.notify();
-                        }
-                    })
-                    .is_err()
-                {
-                    break;
-                }
-            }
-        });
-        Self {
-            workspace,
-            machine,
-            shared,
-            visible,
-            commands,
-            focus: cx.focus_handle(),
-            page_bounds: Rc::default(),
-            tools_bounds: Rc::default(),
-            address: "about:blank".into(),
-            editing_address: false,
-            tools_focus: false,
-            seen: 0,
-            last_target: String::new(),
-            last_tools_epoch: 0,
-            pressed: Default::default(),
-            finished: Some(finished),
-            confirm_takeover: false,
-            confirm_stop: false,
-            _refresh: refresh,
-        }
+    pub fn with_viewer(workspace: String, machine: String, viewer: Arc<super::viewer::Viewer>,
+        window: &mut Window, cx: &mut Context<Self>) -> Self {
+        Self::configured(Config { workspace, machine, viewer, group:None, attached:true, visible:true }, window, cx)
+    }
+    pub fn configured(config: Config, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        Self::start(config, false, None, window, cx)
     }
     fn reconnect(&mut self, force: bool, window: &mut Window, cx: &mut Context<Self>) {
+        self.invalidate_clipboard();
+        if let Some(saved) = self.saved_group() {
+            if let Some(group) = &mut self.group { group.saved = saved; }
+        }
+        self.closed.store(true, Ordering::SeqCst);
         self.shared.lock().unwrap().ready = false;
+        let poisoned = {
+            let state = self.shared.lock().unwrap();
+            state.clipboard_poisoned && state.phase != Phase::Stopped
+        };
         let previous = self.finished.take();
         let replacement = Self::start(
-            self.workspace.clone(),
-            self.machine.clone(),
+            Config { workspace:self.workspace.clone(), machine:self.machine.clone(),
+                viewer:self.viewer.clone(), group:self.group.clone(), attached:true,
+                visible:self.visible.load(Ordering::Relaxed) },
             force,
             previous,
+            window,
             cx,
         );
+        replacement.shared.lock().unwrap().clipboard_poisoned = poisoned;
+        let pane = self.pane.clone();
+        let chrome = self.chrome.take();
+        let copy = self.chrome_copy;
+        let runtime = self.chrome_runtime.clone();
         *self = replacement;
+        if let Some(runtime) = runtime { self.set_chrome(pane, chrome, copy, runtime, cx); }
         self.focus.focus(window, cx);
         cx.notify();
+    }
+    pub fn set_chrome(&mut self, pane: String, root: Option<Entity<gpui_shell::ShellRoot>>, copy: u64,
+        runtime: Rc<gpui_shell::ShellRuntime>, cx: &mut Context<Self>) {
+        let changed = self.pane != pane || self.chrome_copy != copy || self.chrome != root;
+        if self.pane != pane && !self.pane.is_empty() { super::chrome::remove(&self.pane); }
+        self.pane = pane;
+        self.chrome = root;
+        self.chrome_copy = copy;
+        self.chrome_runtime = Some(runtime);
+        if changed { self.invalidate_clipboard(); self.refresh_chrome(cx); cx.notify(); }
+    }
+    fn publish_chrome(&self) -> bool {
+        if self.pane.is_empty() { return false; }
+        let state = self.shared.lock().unwrap();
+        let url = state.selected_url();
+        let mut snapshot = json!({"pane":self.pane,"workspace":self.workspace,
+            "remote":!self.machine.is_empty(),"ready":state.ready,"phase":format!("{:?}",state.phase),
+            "url":url,"selected_tab":state.selected_tab,"tabs":state.tabs,
+            "tools_open":state.tools_open,"input_pending":state.input_pending,
+            "error":if state.error.is_empty(){None}else{Some(&state.error)}});
+        snapshot.as_object_mut().unwrap().extend(self.clipboard_state(&state).as_object().unwrap().clone());
+        snapshot.as_object_mut().unwrap().extend(self.context_state(&state).as_object().unwrap().clone());
+        super::chrome::publish(&self.pane, snapshot, self.page_view.downgrade())
+    }
+    fn refresh_chrome(&self, cx: &mut Context<Self>) {
+        // Frame-only revisions never cause a JS description rebuild.
+        if self.publish_chrome() && let (Some(runtime), Some(root)) = (&self.chrome_runtime, &self.chrome) {
+            let _ = runtime.refresh(root, cx);
+        }
     }
     pub fn focus_handle(&self) -> &FocusHandle {
         &self.focus
     }
     pub fn visible(&self, visible: bool) {
         if self.visible.swap(visible, Ordering::Relaxed) && !visible {
+            self.invalidate_clipboard();
             for (_, key) in std::mem::take(&mut *self.pressed.borrow_mut()) {
                 self.input(self.tools_focus,json!({"type":"key","action":"up","key":key,"code":"","modifiers":0,"repeat":false}));
             }
@@ -574,16 +313,132 @@ impl Panel {
             s.revision += 1;
         }
     }
+    /// App commands share the same bounded, controller-owned queue as trusted UI.
+    /// A queued reply is not a claim that Chrome already performed the action.
+    pub fn dispatch_command(&mut self, name: &str, args: &Value, window: &mut Window, cx: &mut Context<Self>) -> std::result::Result<Value, String> {
+        if name == "browser.address_context" {
+            return self.address_context_command(args, window, cx);
+        }
+        if matches!(name, "browser.context_action" | "browser.context_dismiss") {
+            return self.context_command(name, args, window, cx);
+        }
+        if matches!(name, "browser.copy" | "browser.cut" | "browser.paste") {
+            return self.clipboard_command(name, window, cx);
+        }
+        if !self.machine.is_empty() && name != "browser.status" {
+            return Err("Remote browser route unavailable: local fallback is forbidden".into());
+        }
+        if name == "browser.attach" {
+            let force = args.get("force").and_then(Value::as_bool).unwrap_or(false);
+            if force && args.get("confirmed").and_then(Value::as_bool) != Some(true) {
+                return Err("needsConfirmation: force takeover requires confirmed:true".into());
+            }
+            self.reconnect(force, window, cx);
+            return Ok(json!({"queued":true}));
+        }
+        if name == "browser.status" {
+            let geometry = |bounds: Bounds<Pixels>| json!({"x":f32::from(bounds.origin.x),"y":f32::from(bounds.origin.y),
+                "width":f32::from(bounds.size.width),"height":f32::from(bounds.size.height)});
+            let state = self.shared.lock().unwrap();
+            let mut snapshot = json!({"workspace":self.workspace,"ready":state.ready,"phase":format!("{:?}",state.phase),
+                "group":state.group,"selected_tab":state.selected_tab,"selected":state.selected,"tabs":state.tabs,
+                "panel_error":state.error,"input_pending":state.input_pending,
+                "browser_pid":state.browser_pid,"browser_instance":state.instance,"window_active":window.is_window_active(),
+                "page_focused":self.focus.is_focused(window) && !self.editing_address && !self.tools_focus,
+                "page_bounds":geometry(self.page_bounds.get()),"tools_bounds":geometry(self.tools_bounds.get())});
+            snapshot.as_object_mut().unwrap().extend(self.clipboard_state(&state).as_object().unwrap().clone());
+            snapshot.as_object_mut().unwrap().extend(self.context_state(&state).as_object().unwrap().clone());
+            return Ok(snapshot);
+        }
+        if name == "browser.focus_address" {
+            self.invalidate_clipboard();
+            if self.chrome_copy != 0 {
+                if !crate::mods::send_command_to(self.chrome_copy, "focus_address") {
+                    return Err("Browser chrome is not shown".into());
+                }
+                return Ok(json!({"queued":true,"focus":"address"}));
+            }
+            for (_, key) in std::mem::take(&mut *self.pressed.borrow_mut()) {
+                self.input(self.tools_focus, json!({"type":"key","action":"up","key":key,"code":"","modifiers":0,"repeat":false}));
+            }
+            self.editing_address = true;
+            self.tools_focus = false;
+            self.focus.focus(window, cx);
+            cx.notify();
+            return Ok(json!({"focused":"address"}));
+        }
+        if name == "browser.stop" && args.get("confirmed").and_then(Value::as_bool) != Some(true) {
+            return Err("needsConfirmation: stop requires confirmed:true".into());
+        }
+        if self.group.is_some() { return self.group_command(name, args, cx); }
+        let (selected, tabs) = {
+            let state = self.shared.lock().unwrap();
+            if !state.ready { return Err("Browser controller is not attached".into()); }
+            (state.selected.clone(), state.tabs.clone())
+        };
+        let target = match args.get("tab") {
+            None | Some(Value::Null) => selected.clone(),
+            Some(Value::String(target)) => target.clone(),
+            _ => return Err("Browser tab must be a string".into()),
+        };
+        let (method, params, selection): (&'static str, Value, Option<String>) = match name {
+            "browser.stop" => ("browser.stop", json!({"confirmed":true}), None),
+            "browser.tab.new" => {
+                let url = match args.get("url") {
+                    None | Some(Value::Null) => "about:blank",
+                    Some(Value::String(url)) => url,
+                    _ => return Err("Browser URL must be a string".into()),
+                };
+                ("browser.tab.create", json!({"url":url}), None)
+            }
+            "browser.tab.next" | "browser.tab.previous" => {
+                let index = tabs.iter().position(|tab| tab["id"] == selected).ok_or("No selected browser tab")?;
+                let next = if name == "browser.tab.next" { (index + 1) % tabs.len() } else { (index + tabs.len() - 1) % tabs.len() };
+                let target = tabs[next]["id"].as_str().ok_or("Invalid browser tab identity")?.to_owned();
+                ("browser.tab.select", json!({"target":target}), Some(target))
+            }
+            "browser.tab.select" | "browser.tab.close" => {
+                if !tabs.iter().any(|tab| tab["id"] == target) { return Err("Browser tab does not belong to this workspace".into()); }
+                let select = name == "browser.tab.select";
+                (if select {"browser.tab.select"} else {"browser.tab.close"}, json!({"target":target}), select.then_some(target))
+            }
+            "browser.navigate" => ("browser.navigate", json!({"target":selected,"url":args.get("url").and_then(Value::as_str).ok_or("Browser URL must be a string")?}), None),
+            "browser.back" | "browser.forward" => ("browser.history", json!({"target":selected,"direction":if name == "browser.back" {"back"} else {"forward"}}), None),
+            "browser.reload" => ("browser.reload", json!({"target":selected}), None),
+            "browser.devtools.open" => ("browser.devtools.open", json!({"target":selected}), None),
+            "browser.devtools.close" => ("browser.devtools.close", json!({"target":selected}), None),
+            _ => return Err("Unsupported browser command".into()),
+        };
+        self.invalidate_clipboard();
+        self.commands.try_send(Command { method, params, follow: false, clipboard: None, context: None })
+            .map_err(|error| format!("Browser command queue full/disconnected: {error}"))?;
+        if let Some(selection) = selection {
+            let mut state = self.shared.lock().unwrap();
+            state.selected = selection;
+            state.page = None;
+            state.revision += 1;
+        }
+        cx.notify();
+        Ok(json!({"queued":true}))
+    }
+
     fn command(&self, method: &'static str, params: Value) {
         // Layout/held-key callbacks can arrive after stop or ownership loss.
         // They must neither enqueue work nor overwrite the terminal diagnosis.
         if !self.shared.lock().unwrap().ready {
             return;
         }
+        let event = &params["event"];
+        if method != "browser.input" || event["type"] == "wheel" || event["type"] == "text"
+            || event["action"] == "down" {
+            self.invalidate_clipboard();
+        }
         if let Err(e) = self.commands.try_send(Command {
             method,
             params,
             follow: false,
+            clipboard: None,
+            context: None,
         }) {
             let mut s = self.shared.lock().unwrap();
             s.queue_failed(&e.to_string());
@@ -596,19 +451,48 @@ impl Panel {
         json!({"kind":if tools {"devtools"} else {"page"},"target":self.target()})
     }
     fn input(&self, tools: bool, event: Value) {
+        if self.target().is_empty() { return; }
         self.command(
             "browser.input",
             json!({"surface":self.surface(tools),"event":event}),
         );
     }
     fn viewport(&self, tools: bool, bounds: Bounds<Pixels>) {
+        if !tools { self.invalidate_clipboard(); }
         if self.target().is_empty() {
             return;
         }
         self.command("browser.viewport",json!({"surface":self.surface(tools),"width":f32::from(bounds.size.width).clamp(1.,4096.) as u32,"height":f32::from(bounds.size.height).clamp(1.,4096.) as u32,"scale":1}));
     }
+    fn menu_key(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if ev.keystroke.key == "escape" && self.context_menu.is_some() {
+            let _ = self.context_command("browser.context_dismiss", &json!({}), window, cx);
+            cx.stop_propagation();
+        }
+    }
     fn key(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if self.chrome.is_some() && !self.focus.is_focused(window) { return; }
         let k = &ev.keystroke;
+        if k.key == "escape" && self.context_menu.is_some() {
+            let _ = self.context_command("browser.context_dismiss", &json!({}), window, cx);
+            cx.stop_propagation();
+            return;
+        }
+        if let Some(name) = clipboard::shortcut(&k.key, &k.modifiers) {
+            if !ev.is_held {
+                self.context_menu = None;
+                self.cancel_clipboard();
+                // Release modifiers before the native helper command; their later
+                // physical key-up must not invalidate this operation's owner.
+                for (_, key) in std::mem::take(&mut *self.pressed.borrow_mut()) {
+                    self.input(self.tools_focus, json!({"type":"key","action":"up","key":key,"code":"","modifiers":0,"repeat":false}));
+                }
+                let _ = self.clipboard_command(name, window, cx);
+            }
+            cx.stop_propagation();
+            return;
+        }
+        self.invalidate_clipboard();
         // Ctrl+Escape only leaves the streamed surface; never sends Escape to a
         // running debugger or discards a page draft. Existing Herdr actions still
         // resolve through the parent key context, not a second hardcoded map.
@@ -661,6 +545,16 @@ impl Panel {
             self.input(self.tools_focus,json!({"type":"key","action":"up","key":key,"code":"","modifiers":mods(&ev.keystroke.modifiers),"repeat":false}));
         }
     }
+    /// The mod composition slot contains only native streamed surfaces.
+    pub fn render_page(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let tools = self.shared.lock().unwrap().tools_open;
+        div().flex().flex_col().size_full().min_h_0()
+            .child(self.streamed(false, cx))
+            .when(tools, |element| element.child(div().h(px(330.)).w_full().flex().flex_col()
+                .border_t_1().border_color(rgb(0x657080)).child(self.streamed(true, cx))))
+            .into_any_element()
+    }
+
     fn streamed(&self, tools: bool, cx: &mut Context<Self>) -> AnyElement {
         let bounds = if tools {
             self.tools_bounds.clone()
@@ -681,9 +575,11 @@ impl Panel {
         };
         div().id(if tools {"devtools-surface"} else {"page-surface"}).relative().flex_1().min_h_0().w_full().overflow_hidden().bg(rgb(0xffffff))
             .child(canvas(move |b,_,cx| { if before.replace(b).size != b.size { let _=entity.update(cx,|this,_| this.viewport(tools,b)); } },move |b,_,w,cx| {w.handle_input(&input_focus, ElementInputHandler::new(b,input_view),cx);if let Some(image)=image {let _=w.paint_image(b,b,Corners::default(),image,0,false);} }).size_full())
-            .on_mouse_down(MouseButton::Left,cx.listener(move |this,e:&MouseDownEvent,w,cx| {this.focus.focus(w,cx);this.tools_focus=tools;this.editing_address=false; let b=if tools {this.tools_bounds.get()}else{this.page_bounds.get()}; let p=e.position-b.origin;this.input(tools,json!({"type":"pointer","action":"down","x":f32::from(p.x),"y":f32::from(p.y),"button":"left","buttons":1,"modifiers":mods(&e.modifiers),"click_count":e.click_count}));}))
+            .on_mouse_down(MouseButton::Right,cx.listener(move |this,e:&MouseDownEvent,w,cx| this.context_pointer_down(tools,e,w,cx)))
+            .on_mouse_up(MouseButton::Right,cx.listener(move |this,e:&MouseUpEvent,w,cx| this.context_pointer_up(tools,e,w,cx)))
+            .on_mouse_down(MouseButton::Left,cx.listener(move |this,e:&MouseDownEvent,w,cx| {this.invalidate_clipboard();this.focus.focus(w,cx);this.tools_focus=tools;this.editing_address=false; let b=if tools {this.tools_bounds.get()}else{this.page_bounds.get()}; let p=e.position-b.origin;this.input(tools,json!({"type":"pointer","action":"down","x":f32::from(p.x),"y":f32::from(p.y),"button":"left","buttons":1,"modifiers":mods(&e.modifiers),"click_count":e.click_count}));}))
             .on_mouse_up(MouseButton::Left,cx.listener(move |this,e:&MouseUpEvent,_,_| {let b=if tools {this.tools_bounds.get()}else{this.page_bounds.get()};let p=e.position-b.origin;this.input(tools,json!({"type":"pointer","action":"up","x":f32::from(p.x),"y":f32::from(p.y),"button":"left","buttons":0,"modifiers":mods(&e.modifiers),"click_count":1}));}))
-            .on_mouse_move(cx.listener(move |this,e:&MouseMoveEvent,_,_| {if e.pressed_button.is_some() {let b=if tools {this.tools_bounds.get()}else{this.page_bounds.get()};let p=e.position-b.origin;this.input(tools,json!({"type":"pointer","action":"move","x":f32::from(p.x),"y":f32::from(p.y),"button":"none","buttons":1,"modifiers":mods(&e.modifiers),"click_count":1}));}}))
+            .on_mouse_move(cx.listener(move |this,e:&MouseMoveEvent,_,_| {if e.pressed_button==Some(MouseButton::Left) {let b=if tools {this.tools_bounds.get()}else{this.page_bounds.get()};let p=e.position-b.origin;this.input(tools,json!({"type":"pointer","action":"move","x":f32::from(p.x),"y":f32::from(p.y),"button":"none","buttons":1,"modifiers":mods(&e.modifiers),"click_count":1}));}}))
             .on_scroll_wheel(cx.listener(move |this,e:&ScrollWheelEvent,_,cx| {let b=if tools {this.tools_bounds.get()}else{this.page_bounds.get()};let p=e.position-b.origin;let d=e.delta.pixel_delta(px(24.));this.input(tools,json!({"type":"wheel","x":f32::from(p.x),"y":f32::from(p.y),"dx":-f32::from(d.x),"dy":-f32::from(d.y),"modifiers":mods(&e.modifiers)}));cx.stop_propagation();})).into_any_element()
     }
 }
@@ -806,8 +702,11 @@ fn mods(m: &Modifiers) -> u8 {
 }
 impl Drop for Panel {
     fn drop(&mut self) {
+        self.closed.store(true, Ordering::SeqCst);
         self.visible.store(false, Ordering::Relaxed);
+        self.invalidate_clipboard();
         self.shared.lock().unwrap().ready = false;
+        if !self.pane.is_empty() { super::chrome::remove(&self.pane); }
     }
 }
 impl Render for Panel {
@@ -843,15 +742,24 @@ impl Render for Panel {
             self.page_bounds.set(Bounds::default());
             self.tools_bounds.set(Bounds::default());
         }
+        if let Some(root) = self.chrome.clone() {
+            return div().id("workspace-browser").occlude().track_focus(&self.focus)
+                .key_context("HerdrBrowser").size_full()
+                .capture_key_down(cx.listener(Self::menu_key))
+                .on_key_down(cx.listener(Self::key)).on_key_up(cx.listener(Self::key_up))
+                .child(root).into_any_element();
+        }
         div()
             .id("workspace-browser")
             .occlude()
             .track_focus(&self.focus)
+            .key_context("HerdrBrowser")
             .flex()
             .flex_col()
             .size_full()
             .bg(rgb(0x20242b))
             .text_color(rgb(0xffffff))
+            .capture_key_down(cx.listener(Self::menu_key))
             .on_key_down(cx.listener(Self::key))
             .on_key_up(cx.listener(Self::key_up))
             .child(
@@ -900,6 +808,7 @@ impl Render for Panel {
                             .bg(rgb(0x353b45))
                             .child(self.address.clone())
                             .on_click(cx.listener(|this, _, w, cx| {
+                                this.invalidate_clipboard();
                                 this.editing_address = true;
                                 this.address.clear();
                                 this.focus.focus(w, cx);
@@ -957,10 +866,10 @@ impl Render for Panel {
                         cx.listener(|this, _, _, _| this.command("browser.tab.create", json!({}))),
                     )),
             )
-            .child(div().flex().gap_3().p_1().text_xs().child(match phase {Phase::Starting=>"Connecting to workspace core…",Phase::Running=>"Attached · exclusive controller",Phase::Blocked=>"In use on another desktop",Phase::Revoked=>"Control revoked/disconnected · no automatic reclaim",Phase::Stopped=>"Stopped · profile retained",Phase::Failed=>"Browser unavailable"})
+            .child(div().flex().gap_3().p_1().text_xs().child(match phase {Phase::Detached=>"Saved browser pane — attach to start its selected page",Phase::Starting=>"Connecting to workspace core…",Phase::Running=>"Attached · exclusive controller",Phase::Blocked=>"In use on another desktop",Phase::Revoked=>"Control revoked/disconnected · no automatic reclaim",Phase::Stopped=>"Stopped · profile retained",Phase::Failed=>"Browser unavailable"})
                 .when(!ready && phase!=Phase::Starting,|d|d.child(div().id("browser-reconnect").cursor_pointer().child("Reconnect / start").on_click(cx.listener(|this,_,w,cx|this.reconnect(false,w,cx)))))
-                .when(matches!(phase,Phase::Blocked|Phase::Revoked),|d|d.child(div().id("browser-takeover").cursor_pointer().child("Force takeover…").on_click(cx.listener(|this,_,_,cx|{this.confirm_takeover=true;cx.notify();}))))
-                .when(ready,|d|d.child(div().id("browser-stop").cursor_pointer().child("Stop workspace browser…").on_click(cx.listener(|this,_,_,cx|{this.confirm_stop=true;cx.notify();})))))
+                .when(matches!(phase,Phase::Blocked|Phase::Revoked),|d|d.child(div().id("browser-takeover").cursor_pointer().child("Force takeover…").on_click(cx.listener(|this,_,_,cx|{this.invalidate_clipboard();this.confirm_takeover=true;cx.notify();}))))
+                .when(ready,|d|d.child(div().id("browser-stop").cursor_pointer().child("Stop workspace browser…").on_click(cx.listener(|this,_,_,cx|{this.invalidate_clipboard();this.confirm_stop=true;cx.notify();})))))
             .when(self.confirm_takeover,|d|d.child(div().flex().gap_3().p_2().bg(rgb(0x59442c)).child("Disconnect the other desktop and revoke its input/DevTools?")
                 .child(div().id("browser-confirm-takeover").cursor_pointer().child("Confirm takeover").on_click(cx.listener(|this,_,w,cx|this.reconnect(true,w,cx))))
                 .child(div().id("browser-cancel-takeover").cursor_pointer().child("Cancel").on_click(cx.listener(|this,_,_,cx|{this.confirm_takeover=false;cx.notify();})))))
@@ -985,7 +894,7 @@ impl Render for Panel {
             })
             .child(div().text_xs().child(
                 format!("Ctrl+Escape: focus address without sending Escape · hide keeps Chromium alive · input ACKs pending: {input_pending}"),
-            ))
+            )).into_any_element()
     }
 }
 
@@ -996,6 +905,58 @@ mod tests {
 
     fn select(s: &mut Snapshot, target: &str) {
         s.tabs(json!({"revision":s.metadata_revision + 1,"selected":target,"tabs":[{"id":"A"},{"id":"B"}]}));
+    }
+
+    #[test]
+    fn grouped_snapshot_rejects_foreign_and_legacy_catalogs_before_revision_comparison() {
+        let mut state = Snapshot::default();
+        state.tabs(json!({"group":"pane-a","revision":1,"selected":"pane-a:tab",
+            "tabs":[{"id":"pane-a:tab","target":"native-A","url":"https://owned.test/a"}]}));
+        for foreign in [json!({"revision":900,"selected":"native-B","tabs":[{"id":"native-B"}]}),
+            json!({"group":"pane-b","revision":1000,"selected":"pane-b:tab","tabs":[{"id":"pane-b:tab","target":"native-B"}]})] {
+            state.tabs(foreign);
+            assert_eq!(state.group,"pane-a");
+            assert_eq!(state.selected,"native-A");
+            assert_eq!(state.metadata_revision,1);
+        }
+        state.tabs(json!({"group":"pane-a","revision":2,"selected":"pane-a:tab",
+            "tabs":[{"id":"pane-a:tab","target":"native-A","url":"https://owned.test/new"}]}));
+        assert_eq!(state.metadata_revision,2);
+        assert_eq!(state.selected_url(),"https://owned.test/new");
+    }
+
+    #[test]
+    fn grouped_metadata_never_uses_a_saved_tab_id_as_a_native_target() {
+        let mut state = Snapshot::default();
+        state.tabs(json!({"group":"pane-a","revision":1,"selected":"bt-saved",
+            "tabs":[{"id":"bt-saved","target":"native-A","url":"https://owned.test/"}]}));
+        assert_eq!(state.selected,"native-A");
+        assert_eq!(state.selected_tab,"bt-saved");
+        assert!(state.owns_target("native-A"));
+        assert!(!state.owns_target("bt-saved"));
+        state.tabs(json!({"group":"pane-a","revision":2,"selected":"bt-lazy",
+            "tabs":[{"id":"bt-lazy","target":null,"url":"https://not-loaded.test/"}]}));
+        assert!(state.selected.is_empty(),"unloaded saved entries cannot receive frame/input RPCs");
+        assert_eq!(state.selected_tab,"bt-lazy");
+        assert_eq!(state.selected_url(),"https://not-loaded.test/");
+        assert!(!state.owns_target("bt-lazy"));
+        assert!(!state.owns_target(""));
+    }
+
+    #[test]
+    fn late_observation_failure_cannot_replace_an_observed_stop() {
+        for phase in [Phase::Stopped, Phase::Revoked, Phase::Failed] {
+            let mut state = Snapshot { phase, error:"observed terminal diagnosis".into(), ..Snapshot::default() };
+            state.observation_failed(Phase::Failed,"late group RPC failure".into());
+            assert_eq!(state.phase,phase);
+            assert_eq!(state.error,"observed terminal diagnosis");
+            assert_eq!(state.revision,0);
+        }
+        let mut active = Snapshot { ready:true, phase:Phase::Running, ..Snapshot::default() };
+        active.observation_failed(Phase::Failed,"active group RPC failure".into());
+        assert!(!active.ready);
+        assert_eq!(active.phase,Phase::Failed);
+        assert_eq!(active.revision,1);
     }
 
     #[test]

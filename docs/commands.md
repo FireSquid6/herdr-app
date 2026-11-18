@@ -17,6 +17,192 @@ Actions use the current selection unless you give an explicit target.
 Some actions close terminals; read their descriptions before running them.
 Mods can add their own actions, which are not listed here.
 
+## `browser.new`
+
+Show the local workspace's core-owned browser; remote creation stays blocked.
+
+| Argument | Required |
+|---|---|
+| `space` | no |
+
+## `browser.status`
+
+Inspect the selected browser pane's observed controller and tab state.
+
+| Argument | Required |
+|---|---|
+| `pane` | no |
+
+## `browser.attach`
+
+Explicitly attach/reconnect the browser; force takeover requires confirmed true.
+
+| Argument | Required |
+|---|---|
+| `pane` | no |
+| `force` | no |
+| `confirmed` | no |
+
+## `browser.stop`
+
+Stop the workspace browser only with confirmed true; live drafts are lost and profile retained.
+
+| Argument | Required |
+|---|---|
+| `pane` | no |
+| `confirmed` | no |
+
+## `browser.copy`
+
+Copy through the focused native page or address editor; page completion is asynchronous.
+
+| Argument | Required |
+|---|---|
+| `pane` | no |
+
+## `browser.cut`
+
+Cut through the focused native page or address editor; page completion is asynchronous and never automatically retried.
+
+| Argument | Required |
+|---|---|
+| `pane` | no |
+
+## `browser.paste`
+
+Paste a fresh local plaintext snapshot into the focused native page or address editor.
+
+| Argument | Required |
+|---|---|
+| `pane` | no |
+
+## `browser.address_context`
+
+Open a local one-shot address menu on the exact focused native input; selection is eligibility metadata, not clipboard text.
+
+| Argument | Required |
+|---|---|
+| `pane` | no |
+| `selection` | yes |
+
+## `browser.context_action`
+
+Consume an owned, current, one-shot native page context-menu capability; stale menus fail closed.
+
+| Argument | Required |
+|---|---|
+| `pane` | no |
+| `token` | yes |
+| `action` | yes |
+
+## `browser.context_dismiss`
+
+Dismiss browser context and abandon older clipboard exports without retrying native edits.
+
+| Argument | Required |
+|---|---|
+| `pane` | no |
+
+## `browser.tab.new`
+
+Queue a new browser tab in the focused browser pane.
+
+| Argument | Required |
+|---|---|
+| `pane` | no |
+| `url` | no |
+
+## `browser.tab.select`
+
+Select an existing browser tab by its live target ID.
+
+| Argument | Required |
+|---|---|
+| `pane` | no |
+| `tab` | yes |
+
+## `browser.tab.close`
+
+Queue closure of a browser tab (selected by default).
+
+| Argument | Required |
+|---|---|
+| `pane` | no |
+| `tab` | no |
+
+## `browser.tab.next`
+
+Select the next browser tab, wrapping within the browser pane.
+
+| Argument | Required |
+|---|---|
+| `pane` | no |
+
+## `browser.tab.previous`
+
+Select the previous browser tab, wrapping within the browser pane.
+
+| Argument | Required |
+|---|---|
+| `pane` | no |
+
+## `browser.focus_address`
+
+Focus address editing for the selected browser pane.
+
+| Argument | Required |
+|---|---|
+| `pane` | no |
+
+## `browser.navigate`
+
+Queue navigation of the selected browser target.
+
+| Argument | Required |
+|---|---|
+| `pane` | no |
+| `url` | yes |
+
+## `browser.back`
+
+Go back in the selected browser target's live history.
+
+| Argument | Required |
+|---|---|
+| `pane` | no |
+
+## `browser.forward`
+
+Go forward in the selected browser target's live history.
+
+| Argument | Required |
+|---|---|
+| `pane` | no |
+
+## `browser.reload`
+
+Reload the selected browser target.
+
+| Argument | Required |
+|---|---|
+| `pane` | no |
+
+## `browser.devtools.open`
+
+Open workspace-scoped DevTools for the selected browser target.
+
+| Argument | Required |
+|---|---|
+| `pane` | no |
+
+## `browser.devtools.close`
+
+Close the selected browser pane's DevTools frontend.
+
+| Argument | Required |
+|---|---|
+| `pane` | no |
+
 ## `space.new`
 
 Make a space: its name (default: none, so it's called after where its first terminal is), the folder its terminals start in (default: the focused terminal's), its first tab's name (default: none, so it's called by its number), optionally an agent (argv) and its first message (task), and the machine it lives on (`hc machine ls`; default the focused space's machine for keys and clicks, this computer for scripts; empty string: this computer; its terminals start in that machine's home unless folder). It is shown at once; focus false keeps the shown space and tab (with no space shown, the new space is shown).

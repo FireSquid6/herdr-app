@@ -6,9 +6,11 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+mod browser_compat;
+
 /// What a block shows.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(untagged)]
+#[serde(untagged, from = "browser_compat::StoredContent")]
 pub enum Content {
     Terminal { terminal: String },
     Mod {

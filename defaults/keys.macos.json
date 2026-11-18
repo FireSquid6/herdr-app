@@ -59,6 +59,13 @@
     "ctrl-8": "space.select:8",
     "ctrl-9": "space.select:9"
   },
+  "browser": {
+    "cmd-t": "browser.tab.new",
+    "cmd-w": "browser.tab.close",
+    "ctrl-tab": "browser.tab.next",
+    "ctrl-shift-tab": "browser.tab.previous",
+    "cmd-l": "browser.focus_address"
+  },
   "terminal": {
     "cmd-f": "terminal.search",
     "cmd-a": "terminal.select_all",

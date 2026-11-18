@@ -12,6 +12,73 @@ use std::{
 
 
 #[gpui::test]
+fn core_browser_chrome_is_trusted_mod_ui_with_inert_page_metadata(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let mut values = fixture(false, json!({"pane":"browser-pane"}), updates("current", "current"));
+    values.insert("browserState".into(), json!({"pane":"browser-pane","workspace":"space","ready":true,
+        "url":"https://example.test/", "selected_tab":"target", "tools_open":false,
+        "tabs":[{"id":"target","title":"<script>run('app.quit')</script>","url":"https://example.test/"}]}));
+    let tree = describe_with_values(cx, &staged, "mods/browser-chrome", values, None).unwrap();
+    for control in ["browser-toolbar", "browser-address", "browser-tab-target", "browser-tab-new"] {
+        assert!(tree.contains(control), "missing {control}: {tree}");
+    }
+    assert!(tree.contains("<script>run('app.quit')</script>"), "website title must remain inert text: {tree}");
+
+    for link in ["javascript:run('app.quit')", "https://example.test/<script>app.quit</script>"] {
+        let mut values = fixture(false, json!({"pane":"browser-pane"}), updates("current", "current"));
+        values.insert("browserState".into(), json!({"pane":"browser-pane","ready":true,"url":"",
+            "context_menu":{"token":"opaque-token","target":"target","x":99999,"y":99999,
+                "link":link,"title":"<script>run('app.quit')</script>",
+                "can_copy":true,"can_cut":true,"can_paste":true,"editable":true}}));
+        let tree = describe_with_values(cx, &staged, "mods/browser-chrome", values, None).unwrap();
+        for control in ["browser-page-root", "browser-context-backdrop", "browser-context-menu",
+            "browser-context-copy", "browser-context-cut", "browser-context-paste",
+            "browser-context-select_all", "browser-context-copy_link",
+            "browser-context-open_link", "browser-context-new_tab"] {
+            assert!(tree.contains(control), "missing {control}: {tree}");
+        }
+        assert!(tree.contains(link), "link must remain a plain label: {tree}");
+        assert!(tree.contains("<script>run('app.quit')</script>"), "menu title must remain a plain label: {tree}");
+    }
+
+    let source = include_str!("../../defaults/mods/browser-chrome/main.js");
+    for command in ["browser.address_context", "browser.context_action", "browser.context_dismiss"] {
+        assert!(source.contains(command), "missing menu command {command}");
+    }
+    for setup in ["this.confirmStop = true;", "this.confirmTakeover = true;"] {
+        let mut values = fixture(false, json!({"pane":"browser-pane"}), updates("current", "current"));
+        values.insert("browserState".into(), json!({"ready":false,"url":""}));
+        let tree = describe_with_values(cx, &staged, "mods/browser-chrome", values, Some(setup)).unwrap();
+        let kind = if setup.contains("Takeover") { "takeover" } else { "stop" };
+        assert!(tree.contains(&format!("browser-{kind}-confirmation")), "{tree}");
+        assert!(tree.contains(&format!("browser-confirm-{kind}")), "{tree}");
+        assert!(tree.contains(&format!("browser-cancel-{kind}")), "{tree}");
+        assert!(tree.contains("Live drafts"), "missing live-draft warning: {tree}");
+    }
+}
+
+#[gpui::test]
+fn address_context_uses_the_shared_menu_without_page_link_actions(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    for selection in [false, true] {
+        let mut values = fixture(false, json!({"pane":"address-pane"}), updates("current", "current"));
+        values.insert("browserState".into(), json!({"pane":"address-pane","ready":false,"remote":true,"url":"https://example.test/",
+            "context_menu":{"source":"address","token":"local-address-token","target":"","x":0,"y":0,"link":null,
+                "editable":true,"selection_present":selection,"can_copy":selection,"can_cut":selection,"can_paste":true}}));
+        let tree = describe_with_values(cx, &staged, "mods/browser-chrome", values, None).unwrap();
+        for control in ["browser-address", "browser-context-menu", "browser-context-copy", "browser-context-cut",
+            "browser-context-paste", "browser-context-select_all"] {
+            assert!(tree.contains(control), "missing {control}: {tree}");
+        }
+        for control in ["browser-context-copy_link", "browser-context-open_link", "browser-context-new_tab"] {
+            assert!(!tree.contains(control), "address menu must not expose page action {control}: {tree}");
+        }
+    }
+}
+
+#[gpui::test]
 fn mod_text_selection_stays_in_its_shell_root(cx: &mut TestAppContext) {
     use gpui::*;
     use gpui_base::{SelectableText, TextSelection, TextView, TextViewState};
@@ -148,6 +215,7 @@ fn fixture(populated: bool, props: Value, update: Value) -> BTreeMap<String, Val
     let mut values = BTreeMap::from([
         ("props".into(), props),
         ("checking".into(), json!(false)),
+        ("browserState".into(), Value::Null),
         ("machines".into(), json!([{ "name": null, "layout": "ready" }])),
         ("spaces".into(), json!([])), ("agents".into(), json!([])), ("terminals".into(), json!([])), ("panes".into(), json!([])), ("focused".into(), Value::Null),
         ("layout".into(), serde_json::from_str(include_str!("../../defaults/layouts/main.json")).unwrap()),
@@ -447,7 +515,7 @@ fn describe_with_values(
         .with_storage_path(staged.0.join(format!("store-{}.json", NEXT_STORE.fetch_add(1, Ordering::Relaxed))))
         .with_capabilities(Capabilities::new().storage(true).read_roots([staged.0.clone()]))
         .with_host_module(module(values, calls.clone()))?;
-    let runtime = ShellRuntime::new_isolated()?;
+    let runtime = ShellRuntime::new_isolated_with_components(crate::browser::chrome::components())?;
     let root = setup.map(|s| staged.wrapper(entry, s)).unwrap_or_else(|| staged.0.join(entry));
     let window = cx.add_window(|_, _| Empty);
     let result = window.update(cx, |_, window, cx| {

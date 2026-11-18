@@ -6,6 +6,7 @@
 
 use crate::hc::Core;
 mod floats;
+mod browser_commands;
 mod movable;
 mod pane_drag;
 mod pane_size;
@@ -384,6 +385,7 @@ struct Watched {
 pub struct AppWindow {
     core: Arc<Core>,
     browsers: HashMap<String, Entity<crate::browser::panel::Panel>>,
+    browser_viewers: HashMap<String, Arc<crate::browser::viewer::Viewer>>,
     runtime: Option<Rc<ShellRuntime>>,
     restarting_mods: bool,
     load_recovery: Option<Instant>,
@@ -510,7 +512,7 @@ impl AppWindow {
     }
 
     fn with_file_events(core: Arc<Core>, requests: async_channel::Receiver<Request>, file_events: Option<crate::files::FileEvents>, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let runtime = ShellRuntime::new(cx).map_err(|e| tracing::error!("script runtime failed, mods are off: {e:#}")).ok();
+        let runtime = ShellRuntime::new_with_components(cx, crate::browser::chrome::components()).map_err(|e| tracing::error!("script runtime failed, mods are off: {e:#}")).ok();
         if let (Some(runtime), Some(events)) = (&runtime, &file_events) {
             runtime.set_source_revision_provider(events.revision_provider());
         }
@@ -519,6 +521,7 @@ impl AppWindow {
         let mut w = AppWindow {
             core,
             browsers: HashMap::new(),
+            browser_viewers: HashMap::new(),
             runtime,
             restarting_mods: false,
             load_recovery: None,
@@ -1295,6 +1298,9 @@ impl AppWindow {
                     mods.push(pane_header_mod(n, name, props));
                 }
                 visit(n, &mut terms, &mut mods);
+                if matches!(n.content(), Some(Content::Mod { name, .. }) if name == crate::browser::NATIVE_SLOT) {
+                    mods.push(self.browser_chrome_instance(n));
+                }
                 if let Some(a) = self.swapped.get(&n.id) {
                     terms.push((format!("{}{SWAP}", n.id), a.clone()));
                 }
@@ -1355,6 +1361,10 @@ impl AppWindow {
             for n in c.root.walk() {
                 if let Some(Content::Mod { name, props }) = n.content() {
                     out.insert(n.id.clone(), inst(name, props));
+                    if name == crate::browser::NATIVE_SLOT {
+                        let (slot, chrome) = self.browser_chrome_instance(n);
+                        out.insert(slot, chrome);
+                    }
                 }
                 if let Some((name, props)) = &header
                     && n.is_pane()
@@ -1570,6 +1580,7 @@ impl AppWindow {
             }
         }
         self.publish_shown_copies();
+        self.prepare_browser_chrome(window, cx);
 
         // Keyboard to the focused pane when it changes (never steal it from an open dialog).
         let model_pane = self.model.focused_pane();
@@ -1686,10 +1697,18 @@ impl AppWindow {
             let pane=self.model.fresh_id_on("p",on);
             self.model.add_tab(&workspace,Tab::with_pane(&tab,"Browser",Node::block(pane,Content::Mod{name:crate::browser::NATIVE_SLOT.into(),props:Value::Null})));
         }
-        let key=format!("{machine}:{workspace}");
-        self.browsers.entry(key.clone()).or_insert_with(||cx.new(|cx|crate::browser::panel::Panel::new(workspace,machine,cx)));
+        let pane = self.model.active_tab().and_then(|tab| tab.root.walk().into_iter().find(|node|
+            matches!(node.content(), Some(Content::Mod { name, .. }) if name == crate::browser::NATIVE_SLOT)))
+            .map(|node| node.id.clone());
+        if let Some(pane) = &pane { self.model.focus_pane(pane); }
         self.sync(window,cx);
-        let focus=self.browsers[&key].read(cx).focus_handle().clone();focus.focus(window,cx);
+        if let Some(panel) = pane.and_then(|pane| self.browsers.get(&pane)).cloned() {
+            if !panel.read(cx).attached() {
+                let _ = panel.update(cx, |panel, cx| panel.dispatch_command("browser.attach", &json!({}), window, cx));
+            }
+            let focus = panel.read(cx).focus_handle().clone();
+            focus.focus(window,cx);
+        }
     }
 
     fn restore_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1799,9 +1818,7 @@ impl AppWindow {
         if !matches!(&node.kind, Kind::Block { content: Content::Mod { name, .. } } if name == crate::browser::NATIVE_SLOT) {
             return None;
         }
-        let space = self.model.space_of(pane)?;
-        let key = format!("{}:{}", space.machine.as_deref().unwrap_or(""), space.id);
-        self.browsers.get(&key).map(|panel| panel.read(cx).focus_handle().clone())
+        self.browsers.get(pane).map(|panel| panel.read(cx).focus_handle().clone())
     }
 
     fn load(&self, inst: Instance, window: &mut Window, cx: &mut Context<Self>) -> Copy {
@@ -2045,6 +2062,7 @@ impl AppWindow {
 
     /// Finish the accepted edit and any newer projection before the window goes.
     pub fn drain_documents(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.sync_browser_saved(cx);
         if self.draining { return; }
         self.save();
         self.draining = true;
@@ -2669,10 +2687,13 @@ impl AppWindow {
         if self.model.space(&space).is_none() {
             return Err(format!("no space {space:?}"));
         }
-        if !self.folders.contains_key(&m) {
+        if m != crate::browser::NATIVE_SLOT && !self.folders.contains_key(&m) {
             return Err(format!("no mod {m:?} in mods/"));
         }
         let machine = self.machine_of(&space);
+        if m == crate::browser::NATIVE_SLOT && machine.is_some() {
+            return Err("Remote browser route unavailable: local fallback is forbidden".into());
+        }
         self.require_document(machine.as_deref())?;
         let (ctx, pane) = (self.model.fresh_id_on("tb", machine.as_deref()), self.model.fresh_id_on("p", machine.as_deref()));
         self.add_new_tab(&space, Tab::with_pane(&ctx, name.trim(), Node::block(pane.clone(), Content::Mod { name: m, props })), focus);
@@ -2705,10 +2726,13 @@ impl AppWindow {
         if self.model.tab_of(&target).is_none() {
             return Err(format!("no pane {target:?}"));
         }
-        if !self.folders.contains_key(&name) {
+        if name != crate::browser::NATIVE_SLOT && !self.folders.contains_key(&name) {
             return Err(format!("no mod {name:?} in mods/"));
         }
         let machine = self.model.space_of(&target).and_then(|s| s.machine.clone());
+        if name == crate::browser::NATIVE_SLOT && machine.is_some() {
+            return Err("Remote browser route unavailable: local fallback is forbidden".into());
+        }
         self.require_document(machine.as_deref())?;
         let new = self.model.fresh_id_on("p", machine.as_deref());
         self.model.split_with(&target, axis, Node::block(new.clone(), Content::Mod { name, props }));
@@ -3096,6 +3120,10 @@ impl AppWindow {
     fn dispatch(&mut self, name: &str, a: &Value, person: bool, window: &mut Window, cx: &mut Context<Self>) {
         let active_ctx = self.model.active_tab().map(|c| c.id.clone());
         match name {
+            name if name.starts_with("browser.") => {
+                let result = self.browser_command(name, a, window, cx);
+                self.answer(result);
+            }
             // ---- spaces
             "space.new" => {
                 let Some(focus) = Self::focus(a) else { return self.fail("space.new focus is true or false") };
@@ -4171,6 +4199,7 @@ impl AppWindow {
     // ---- mods on disk ----------------------------------------------------
 
     fn poll(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.sync_browser_saved(cx);
         self.flush_documents(false, window, cx);
         let ready = Self::update_label();
         if ready != self.update_ready {
@@ -4319,7 +4348,7 @@ impl AppWindow {
     /// dialogs and windows too (toasts close). Hidden copies start fresh when
     /// shown. Terminals, the core and the layout stay.
     fn restart_mods(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        let fresh = match ShellRuntime::replace_default(cx) {
+        let fresh = match ShellRuntime::replace_default_with_components(cx, crate::browser::chrome::components()) {
             Ok(fresh) => fresh,
             Err(e) => {
                 tracing::error!("could not start a new script runtime: {e:#}");
@@ -4564,7 +4593,7 @@ impl AppWindow {
                 None => div().into_any_element(),
             },
             Content::Mod { name, .. } if name == crate::browser::NATIVE_SLOT => {
-                let panel=self.model.space_of(&n.id).and_then(|s|self.browsers.get(&format!("{}:{}",s.machine.as_deref().unwrap_or(""),s.id))).cloned();
+                let panel=self.browsers.get(&n.id).cloned();
                 match panel {
                     Some(panel)=>div().size_full().child(panel).into_any_element(),
                     None=>div().size_full().flex().flex_col().items_center().justify_center().gap_3()
@@ -5367,9 +5396,12 @@ impl Render for AppWindow {
         let tracker = self.float_tracker(cx);
         let win_tracker = self.window_tracker(cx);
         let pane_drag = self.pane_drag_layer(cx);
-        let browser_key = self.model.active_space().map(|s| format!("{}:{}", s.machine.as_deref().unwrap_or(""), s.id));
         let browser_selected=self.browser_selected();
-        for (key, panel) in &self.browsers { panel.read(cx).visible(browser_selected && self.shows_tab() && browser_key.as_ref() == Some(key)); }
+        let visible_browser_panes = self.model.active_tab().filter(|_| self.shows_tab()).map(|tab| {
+            let root = tab.zoomed.as_deref().and_then(|pane| tab.root.find(pane)).unwrap_or(&tab.root);
+            root.visible_blocks().into_iter().map(|node| node.id.as_str()).collect::<HashSet<_>>()
+        }).unwrap_or_default();
+        for (pane, panel) in &self.browsers { panel.read(cx).visible(visible_browser_panes.contains(pane.as_str())); }
         div()
             .id("herdr")
             .track_focus(&self.focus)
@@ -7064,9 +7096,9 @@ mod tests {
             // Remote panels reject before connecting, so this never starts a core or Chromium.
             this.model.spaces.iter_mut().find(|s| s.id == "browser-space").unwrap().machine = Some("remote".into());
             this.model.split_with("browser-pane", Axis::Row, Node::block("neighbor", Content::Mod { name: "probe".into(), props: Value::Null }));
-            let panel = cx.new(|cx| crate::browser::panel::Panel::new("browser-space".into(), "remote".into(), cx));
+            let panel = cx.new(|cx| crate::browser::panel::Panel::new("browser-space".into(), "remote".into(), window, cx));
             let focus = panel.read(cx).focus_handle().clone();
-            this.browsers.insert("remote:browser-space".into(), panel);
+            this.browsers.insert("browser-pane".into(), panel);
             assert!(this.model.toggle_zoom("browser-pane"));
             this.pane_focus("browser-pane", cx).unwrap().focus(window, cx);
             assert!(focus.is_focused(window));
@@ -7075,6 +7107,100 @@ mod tests {
             this.model.focus_pane("neighbor");
             this.restore_focus(window, cx);
             assert!(!focus.is_focused(window), "a neighboring pane must not restore focus into Chromium");
+        }));
+    }
+
+    #[test]
+    fn browser_native_slots_can_be_created_without_a_javascript_mod_folder() {
+        in_own_process("native_browser_inert_creation");
+    }
+
+    #[gpui::test]
+    fn native_browser_inert_creation(cx: &mut gpui::TestAppContext) {
+        use crate::{layout::{Content, Node}, model::Tab};
+        use serde_json::{json, Value};
+        if !running_alone("native_browser_inert_creation") { return; }
+        let (view, cx) = open_window(cx,"unused","",json!({"id":"context","type":"block","content":{"tab":"active"}}));
+        cx.update(|window, cx| view.update(cx, |this, cx| {
+            this.documents.get_mut("").unwrap().available = true;
+            this.model.add_space("owned","Owned","",Tab::with_pane("initial","Initial",
+                Node::block("initial-pane",Content::Mod { name:"unused".into(),props:Value::Null })));
+            assert!(!this.folders.contains_key(crate::browser::NATIVE_SLOT));
+            let opened = this.run_as("tab.new",json!({"space":"owned","mod":crate::browser::NATIVE_SLOT}),false,window,cx);
+            let pane = opened["pane"].as_str().unwrap_or_else(|| panic!("{opened}")).to_owned();
+            let split = this.run_as("pane.split",json!({"pane":pane,"direction":"right","mod":crate::browser::NATIVE_SLOT}),false,window,cx);
+            let neighbor = split["pane"].as_str().unwrap_or_else(|| panic!("{split}")).to_owned();
+            for id in [&pane,&neighbor] {
+                let status = this.run_as("browser.status",json!({"pane":id}),false,window,cx);
+                assert_eq!(status["phase"],"Detached","{status}");
+                assert_eq!(status["ready"],false);
+                assert_eq!(status["browser_pid"],0);
+                assert_eq!(status["group"],id.as_str());
+            }
+            assert!(!this.copies.values().any(|copy| copy.inst.name == crate::browser::NATIVE_SLOT));
+        }));
+    }
+
+    #[test]
+    fn browser_commands_reject_remote_creation_without_changing_layout() {
+        in_own_process("native_browser_remote_command");
+    }
+
+    #[gpui::test]
+    fn native_browser_remote_command(cx: &mut gpui::TestAppContext) {
+        use crate::{layout::{Content, Node}, model::Tab};
+        use serde_json::{json, Value};
+        if !running_alone("native_browser_remote_command") { return; }
+        let (view, cx) = open_window(cx, "unused", "",
+            json!({"id":"context", "type":"block", "content":{"tab":"active"}}));
+        cx.update(|window, cx| view.update(cx, |this, cx| {
+            this.model.add_space("remote-browser", "Remote", "", Tab::with_pane("remote-tab", "Terminal",
+                Node::block("remote-pane", Content::Mod { name: "unused".into(), props: Value::Null })));
+            this.model.spaces.iter_mut().find(|space| space.id == "remote-browser").unwrap().machine = Some("remote".into());
+            let before = serde_json::to_value(&this.model.space("remote-browser").unwrap().tabs[0].root).unwrap();
+            let active = this.model.active.clone();
+            let result = this.run_as("browser.new", json!({"space":"remote-browser"}), false, window, cx);
+            assert!(result["error"].as_str().unwrap().contains("Remote browser"), "{result}");
+            let remote = this.model.space("remote-browser").unwrap();
+            assert_eq!(remote.tabs.len(), 1);
+            assert_eq!(serde_json::to_value(&remote.tabs[0].root).unwrap(), before);
+            assert_eq!(this.model.active, active);
+            assert!(this.browsers.is_empty(), "rejection must precede viewer/core creation");
+            this.documents.entry("remote".into()).or_default().available = true;
+            for (name,args) in [("tab.new",json!({"space":"remote-browser","mod":crate::browser::NATIVE_SLOT})),
+                ("pane.split",json!({"pane":"remote-pane","direction":"right","mod":crate::browser::NATIVE_SLOT}))] {
+                let result = this.run_as(name,args,false,window,cx);
+                assert!(result["error"].as_str().unwrap().contains("Remote browser"),"{result}");
+                assert_eq!(this.model.space("remote-browser").unwrap().tabs.len(),1);
+                assert_eq!(serde_json::to_value(&this.model.space("remote-browser").unwrap().tabs[0].root).unwrap(),before);
+                assert!(this.browsers.is_empty());
+            }
+        }));
+    }
+
+    #[test]
+    fn browser_surface_uses_separate_replaceable_trusted_chrome() {
+        in_own_process("native_browser_trusted_chrome");
+    }
+
+    #[gpui::test]
+    fn native_browser_trusted_chrome(cx: &mut gpui::TestAppContext) {
+        use crate::{layout::{Content, Node}, model::Tab};
+        use serde_json::json;
+        if !running_alone("native_browser_trusted_chrome") { return; }
+        let (view, cx) = open_window(cx, "alternate-browser", "import {View, div} from 'gpui-kit'; export default class P extends View {render(){return div().id('alternate-browser-ui').child('Owned alternate chrome');}}",
+            json!({"id":"context", "type":"block", "content":{"tab":"active"}}));
+        cx.update(|window, cx| view.update(cx, |this, cx| {
+            this.model.add_space("skin-space", "Browser", "", Tab::with_pane("skin-tab", "Browser",
+                Node::block("skin-pane", Content::Mod { name: crate::browser::NATIVE_SLOT.into(), props: json!({"chrome":"alternate-browser"}) })));
+            this.model.spaces.iter_mut().find(|space| space.id == "skin-space").unwrap().machine = Some("remote".into());
+            let panel = cx.new(|cx| crate::browser::panel::Panel::new("skin-space".into(), "remote".into(), window, cx));
+            this.browsers.insert("skin-pane".into(), panel);
+            this.sync(window, cx);
+            let chrome = this.copies.get("skin-pane#browser").expect("a browser has an independent trusted chrome slot");
+            assert_eq!(chrome.inst.name, "alternate-browser");
+            assert!(chrome.root.is_some(), "{:?}", chrome.error);
+            assert!(!this.copies.values().any(|copy| copy.inst.name == crate::browser::NATIVE_SLOT));
         }));
     }
 

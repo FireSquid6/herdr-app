@@ -441,6 +441,11 @@ impl Core {
         Ok(core)
     }
 
+    /// A pooled native viewer must never reuse a disconnected connection.
+    pub fn is_closed(&self) -> bool {
+        self.routes.lock().unwrap().closed
+    }
+
     /// Resolves once the connection to the core is gone.
     pub async fn closed(&self) {
         let _ = self.lost.recv().await;
@@ -760,6 +765,7 @@ mod tests {
             child: Mutex::new(child),
             lost,
         };
+        assert!(core.is_closed(), "a viewer pool must not reuse this connection");
         let start = std::time::Instant::now();
         assert!(core.call("doc.get", json!({"name":"herdr-app"})).unwrap_err().to_string().contains("lost the core"));
         assert!(start.elapsed() < Duration::from_secs(1));

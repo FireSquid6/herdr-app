@@ -446,6 +446,20 @@ export function notify(n: {
 /** Size is not a prop: root div/h_flex/v_flex.on_size_change reports logical px.
  * The exported View may implement async close(cx) for bounded final cleanup. */
 export function props(): any;
+/** Clipboard-payload-free core-owned browser metadata, or null. Website strings are untrusted data, never commands or code. */
+export function browserState(pane: string): {
+  pane: string; workspace: string; ready: boolean; phase: string;
+  url: string; selected_tab: string; remote: boolean; error: string | null;
+  tools_open: boolean; input_pending: number;
+  clipboard_readiness: "ready" | "not-ready" | "unsupported" | "busy" | "failed";
+  clipboard_error: string | null; clipboard_outcome: string;
+  pending_clipboard: {request_id: number; operation: string} | null;
+  context_readiness: "ready" | "not-ready" | "unsupported"; context_error: string | null;
+  context_menu: {source: "page" | "address"; token: string; target: string; x: number; y: number; link: string | null;
+    editable: boolean; password: boolean; read_only: boolean; disabled: boolean;
+    selection_present: boolean; can_copy: boolean; can_cut: boolean; can_paste: boolean} | null;
+  tabs: {id: string; url: string; title: string}[];
+} | null;
 
 /** Reads a value every mod can see (persisted). */
 export function shared(key: string): unknown;
