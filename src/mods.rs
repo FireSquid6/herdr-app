@@ -81,7 +81,7 @@ pub fn write_workspace() -> std::io::Result<()> {
         let _ = std::fs::remove_file(dir.join("CLAUDE.md"));
     }
     write_if_changed(&dir.join("herdr.d.ts"), DECLARATIONS)?;
-    let types = gpui_shell::type_declarations(&gpui_shell::FrozenComponentRegistry::default());
+    let types = gpui_shell::type_declarations(&crate::browser::chrome::components());
     write_if_changed(&dir.join("gpui-kit.d.ts"), &types)?;
     let _ = std::fs::remove_dir_all(frame_dir());
     for (path, bytes) in FRAME_MODS {
@@ -1194,6 +1194,7 @@ fn module(inst: Instance, copy: u64) -> HostModule {
             move |_| Ok(float.as_ref().map_or(HostValue::Null, |id| read(&reads, "floats", |s| s.floats.get(id).unwrap_or(&Value::Null))))
         })
         .function("props", move |_| Ok(to_host(&props)))
+        .function("browserState", |args| Ok(to_host(&crate::browser::chrome::state(args.string(0)?))))
         .function("shared", |a| {
             let k = a.string(0)?;
             Ok(with_shared(|s| s.values.get(k).map(to_host).unwrap_or(HostValue::Null)))

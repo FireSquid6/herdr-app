@@ -26,13 +26,21 @@ Package-managed cores are checked but updated through their package manager.
 Dismiss a core update error with its × or `overlay.close {id:"core-update-error"}`;
 it stays dismissed until the error changes or the update recovers.
 
-## Human-only workspace browser (experimental personal fork)
+## Workspace browser (experimental personal fork)
 
-The person's **Browser** outer tab is a native streamed Chromium surface, not a
-terminal or a JavaScript mod. Its inner webpage tabs and real DevTools are human
-controls; there are no agent-facing page inspection, JavaScript, navigation or
-input commands. Do not create/manipulate reserved Browser slots, automate this UI,
-or use a mod/core connection to operate the person's browser.
+The **Browser** page is a native core-owned Chromium stream, not a terminal or
+executable website mod. Surrounding trusted chrome is customizable through
+`browser_chrome`; `BrowserPage(pane)` is the native composition boundary.
+Normal `browser.*` commands and a `browser` section in keys.json drive the same
+trusted controls: open/status/attach/confirmed stop, navigate/history/reload,
+new/select/close/next/previous inner tab, address focus and DevTools open/close.
+No arbitrary page-JavaScript/inspection command or website mod/core bridge exists.
+Only operate a person's browser or private data when explicitly authorized; use
+owned fixtures and scratch profiles/clipboard for development and acceptance.
+`browser.copy`, `browser.cut` and `browser.paste` are asynchronous plaintext
+editing requests, not an immediate completion guarantee; never automatically
+retry Cut. Explicit custom global key conflicts beat browser defaults, and
+browser defaults never consume terminal-focused input.
 
 Opening a workspace alone does not start Chromium. Hiding/closing Browser keeps
 its live pages on that workspace's core; confirmed **Stop workspace browser** is

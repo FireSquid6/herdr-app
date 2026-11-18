@@ -28,6 +28,28 @@ const fn cmd(name: &'static str, args: &'static [Arg], about: &'static str) -> C
 }
 
 pub const COMMANDS: &[Command] = &[
+    cmd("browser.new", &[opt("space")], "Show the local workspace's core-owned browser; remote creation stays blocked."),
+    cmd("browser.status", &[opt("pane")], "Inspect the selected browser pane's observed controller and tab state."),
+    cmd("browser.attach", &[opt("pane"), opt("force"), opt("confirmed")], "Explicitly attach/reconnect the browser; force takeover requires confirmed true."),
+    cmd("browser.stop", &[opt("pane"), opt("confirmed")], "Stop the workspace browser only with confirmed true; live drafts are lost and profile retained."),
+    cmd("browser.copy", &[opt("pane")], "Copy through the focused native page or address editor; page completion is asynchronous."),
+    cmd("browser.cut", &[opt("pane")], "Cut through the focused native page or address editor; page completion is asynchronous and never automatically retried."),
+    cmd("browser.paste", &[opt("pane")], "Paste a fresh local plaintext snapshot into the focused native page or address editor."),
+    cmd("browser.address_context", &[opt("pane"), req("selection")], "Open a local one-shot address menu on the exact focused native input; selection is eligibility metadata, not clipboard text."),
+    cmd("browser.context_action", &[opt("pane"), req("token"), req("action")], "Consume an owned, current, one-shot native page context-menu capability; stale menus fail closed."),
+    cmd("browser.context_dismiss", &[opt("pane")], "Dismiss browser context and abandon older clipboard exports without retrying native edits."),
+    cmd("browser.tab.new", &[opt("pane"), opt("url")], "Queue a new browser tab in the focused browser pane."),
+    cmd("browser.tab.select", &[opt("pane"), req("tab")], "Select an existing browser tab by its live target ID."),
+    cmd("browser.tab.close", &[opt("pane"), opt("tab")], "Queue closure of a browser tab (selected by default)."),
+    cmd("browser.tab.next", &[opt("pane")], "Select the next browser tab, wrapping within the browser pane."),
+    cmd("browser.tab.previous", &[opt("pane")], "Select the previous browser tab, wrapping within the browser pane."),
+    cmd("browser.focus_address", &[opt("pane")], "Focus address editing for the selected browser pane."),
+    cmd("browser.navigate", &[opt("pane"), req("url")], "Queue navigation of the selected browser target."),
+    cmd("browser.back", &[opt("pane")], "Go back in the selected browser target's live history."),
+    cmd("browser.forward", &[opt("pane")], "Go forward in the selected browser target's live history."),
+    cmd("browser.reload", &[opt("pane")], "Reload the selected browser target."),
+    cmd("browser.devtools.open", &[opt("pane")], "Open workspace-scoped DevTools for the selected browser target."),
+    cmd("browser.devtools.close", &[opt("pane")], "Close the selected browser pane's DevTools frontend."),
     // What exists.
     cmd("space.new", &[opt("name"), opt("folder"), opt("tab"), opt("argv"), opt("task"), opt("machine"), opt("focus")],
         "Make a space: its name (default: none, so it's called after where its first terminal is), the folder its terminals start in (default: the focused terminal's), its first tab's name (default: none, so it's called by its number), optionally an agent (argv) and its first message (task), and the machine it lives on (`hc machine ls`; default the focused space's machine for keys and clicks, this computer for scripts; empty string: this computer; its terminals start in that machine's home unless folder). It is shown at once; focus false keeps the shown space and tab (with no space shown, the new space is shown)."),

@@ -45,8 +45,13 @@ sandbox-capable full Chromium and implement browser wire revision 2; otherwise t
 panel reports an unsupported error. Remote workspaces currently report that a
 dedicated viewer connection is required, with no local fallback.
 
-The address field navigates explicitly; Reload, back/forward and inner tabs are
-native controls. DevTools is explicitly opened and docked below the page when
+The address field navigates explicitly; surrounding controls are the trusted
+`browser-chrome` mod (`browser_chrome` in settings.json chooses a clone).
+`browser_url` chooses new-tab pages and `browser_search` is an HTTP(S) search URL
+containing `{query}`. `BrowserPage(pane)` from `herdr-browser` embeds only the
+native page/DevTools surfaces; `browserState(pane)` exposes plain metadata.
+Website strings never become mod code. Reload, back/forward and inner tabs are
+trusted controls. DevTools is explicitly opened and docked below the page when
 supported by core. Hiding/closing the outer tab does not stop Chromium; an inner
 tab's × closes only that webpage. Explicit reconnect and confirmed takeover do not
 happen automatically. Confirmed **Stop workspace browser** loses live drafts and
@@ -60,9 +65,20 @@ bindings retain precedence. Physical key codes, IME and HiDPI are not yet verifi
 This is an experimental native MVP surface, not the complete browsing product;
 remote routing, files/clipboard, native dialogs and full recovery remain incomplete.
 
-Pages and mods receive no browser/CDP bridge. There are no agent-facing browser
-inspection, JavaScript, navigation or input commands. Do not use app automation
-or mod APIs to operate the person's browser; it is a human desktop facility.
+Websites receive no mod/core/CDP bridge. Trusted chrome and ordinary command
+bindings share `browser.new`, `browser.status`, `browser.attach`, `browser.stop`,
+`browser.navigate`, `browser.back`, `browser.forward`, `browser.reload`,
+`browser.tab.new`, `browser.tab.select`, `browser.tab.close`, `browser.tab.next`,
+`browser.tab.previous`, `browser.focus_address`, `browser.devtools.open` and
+`browser.devtools.close`. `browser.address_context` captures the exact local
+native address input; it never falls back to the page. `browser.context_action` consumes a current one-shot
+menu token; `browser.context_dismiss` abandons its UI and older clipboard exports.
+Page `browser.copy`, `browser.cut` and `browser.paste`
+are asynchronous plaintext operations; only observed owned results may reach the
+local clipboard. Do not automatically retry Cut or equate queueing with completion.
+No arbitrary page-JavaScript or inspection command is exposed. Do not operate the
+person's browser, accounts or private data without explicit authorization; tests
+must use owned fixtures and isolated profiles/clipboard.
 
 ## What mods are written in
 
@@ -556,8 +572,13 @@ shortcuts must then be added by hand.
 ```
 
 - Sections: `global`, `layout:<name>` (while `layouts/<name>.json` shows),
-  `terminal` (a terminal has focus), `mod:<name>`. The more specific section
+  `terminal` (a terminal has focus), `browser` (native browser chrome/page, not
+  terminals), `mod:<name>`. The more specific section
   wins: `layout:terminals` over `global`, `terminal` over both.
+- Browser defaults: Ctrl+T/W, Ctrl+Tab/Shift+Tab and Ctrl+L create/close/cycle
+  browser tabs and focus address. macOS uses Cmd+T/W/L and Ctrl+Tab cycling.
+  Explicit global conflicts in customized keys.json win over browser bindings.
+  Customized files are not silently upgraded with missing browser defaults.
 - An action is a command (`name`, or `name:value`: the value fills the
   command's first argument), `send:<text>` (types into the terminal),
   `<mod>.<command>` (delivered to that mod's `nextCommand()`), or `terminal`
@@ -757,6 +778,12 @@ What's about the user, never a look:
 
 - `zoom` scales the whole app: terminals, mods, the layout's px sizes
   (0.5 to 3; the zoom keys change it). Write sizes as designed at zoom 1.
+- `browser_url`: the HTTP(S) default page for a newly requested browser tab
+  (default `https://www.google.com`; `about:blank` is supported).
+- `browser_search`: HTTP(S) search URL containing `{query}`; submitted search
+  bytes are percent-encoded (default `https://www.google.com/search?q={query}`).
+- `browser_chrome`: trusted mod name wrapping the native browser page
+  (default `browser-chrome`); a browser pane's `chrome` prop overrides it.
 - `sounds`: `{ "enabled": true, "done": "<file>", "blocked": "<file>" }`.
   When an agent needs the person, or finishes while they aren't looking at
   it, Herdr plays a sound and (unless they're looking) posts a toast that

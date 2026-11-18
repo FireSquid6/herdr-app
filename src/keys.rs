@@ -25,26 +25,28 @@ use std::collections::BTreeMap;
 pub const ESCAPE_HATCH: &str = "ctrl-alt-shift-escape";
 
 /// The shipped keys: prefix-free; plain ctrl+letter always stays with the
-/// program. Herdr uses ctrl+shift (defaults/keys.json), or cmd on macOS
-/// (defaults/keys.macos.json, with Mac terminal editing keys).
+/// program in terminals. Herdr uses ctrl+shift (defaults/keys.json), or cmd
+/// on macOS (defaults/keys.macos.json), with browser-only conventional keys.
 #[cfg(not(target_os = "macos"))]
 pub const DEFAULTS: &str = include_str!("../defaults/keys.json");
 #[cfg(target_os = "macos")]
 pub const DEFAULTS: &str = include_str!("../defaults/keys.macos.json");
 
-// Exact originals from release tags, deduplicated across v0.1.4–v0.1.15.
+// Exact originals from release tags, deduplicated across v0.1.4–v0.1.16.
 // Keep these when defaults change: only untouched shipped files may migrate.
 #[cfg(any(not(target_os = "macos"), test))]
 const SHIPPED_KEYS: &[&str] = &[
     include_str!("keys/shipped/v0.1.4-keys.json"),
     include_str!("keys/shipped/v0.1.5-keys.json"),
     include_str!("keys/shipped/v0.1.12-keys.json"),
+    include_str!("keys/shipped/v0.1.16-keys.json"),
 ];
 #[cfg(any(target_os = "macos", test))]
 const SHIPPED_MACOS_KEYS: &[&str] = &[
     include_str!("keys/shipped/v0.1.4-keys.macos.json"),
     include_str!("keys/shipped/v0.1.5-keys.macos.json"),
     include_str!("keys/shipped/v0.1.15-keys.macos.json"),
+    include_str!("keys/shipped/v0.1.16-keys.macos.json"),
 ];
 
 #[derive(serde::Deserialize)]
@@ -120,11 +122,12 @@ fn tab(section: &str) -> Result<String, String> {
     match section {
         "global" => Ok("Herdr".into()),
         "terminal" => Ok("Terminal".into()),
+        "browser" => Ok("HerdrBrowser && !Terminal".into()),
         s => match (s.strip_prefix("mod:"), s.strip_prefix("layout:")) {
             (Some(p), _) if !p.is_empty() => Ok(format!("mod == {p}")),
             // While layouts/<name>.json is shown (the window's tab says which).
             (_, Some(l)) if !l.is_empty() => Ok(format!("layout == {l}")),
-            _ => Err(format!("unknown section {s:?}: use \"global\", \"terminal\", \"layout:<name>\" or \"mod:<name>\"")),
+            _ => Err(format!("unknown section {s:?}: use \"global\", \"terminal\", \"browser\", \"layout:<name>\" or \"mod:<name>\"")),
         },
     }
 }
@@ -190,6 +193,13 @@ fn load_text(path: &std::path::Path, defaults: &str, originals: &[&str]) -> Resu
 
 pub fn parse(text: &str) -> Result<Vec<KeyBinding>, String> {
     let sections: Sections = serde_json::from_str(text).map_err(|e| e.to_string())?;
+    // Only byte-exact defaults are implicit. In edited files every global is explicit,
+    // even if its action happens to equal a shipped action (including `terminal`).
+    let shipped = text == include_str!("../defaults/keys.json")
+        || text == include_str!("../defaults/keys.macos.json");
+    let globals: Vec<_> = sections.get("global").into_iter().flat_map(|keys| keys.keys())
+        .filter_map(|keys| KeyBinding::load(keys, Box::new(NoAction), None, false, None, &gpui::DummyKeyboardMapper).ok())
+        .collect();
     let mut out = Vec::new();
     let mut problems = Vec::new();
     for (section, keys) in &sections {
@@ -243,6 +253,10 @@ pub fn parse(text: &str) -> Result<Vec<KeyBinding>, String> {
             };
             let binding = KeyBinding::load(keys, action, predicate, false, None, &gpui::DummyKeyboardMapper);
             match binding {
+                // Removing the browser conflict avoids GPUI's leaf-depth precedence
+                // without promoting globals above unrelated layout/mod/terminal bindings.
+                Ok(b) if section == "browser" && !shipped
+                    && globals.iter().any(|global| global.keystrokes() == b.keystrokes()) => {},
                 Ok(b) => out.push(b),
                 Err(e) => problems.push(format!("{section}.{keys}: {e}")),
             }
@@ -277,6 +291,111 @@ pub fn install(bindings: Vec<KeyBinding>, cx: &mut App) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn browser_section_is_limited_to_browser_focus() {
+        let bindings = super::parse(r#"{"browser":{"ctrl-t":"browser.tab.new"}}"#).unwrap();
+        let keymap = gpui::Keymap::new(bindings);
+        let key = gpui::Keystroke::parse("ctrl-t").unwrap();
+        for (contexts, expected) in [
+            (vec!["Herdr", "HerdrBrowser"], true),
+            (vec!["Herdr"], false),
+            (vec!["Herdr", "Terminal"], false),
+            (vec!["Herdr", "HerdrBrowser", "Terminal"], false),
+            (vec!["Herdr", "mod=editor"], false),
+        ] {
+            let stack: Vec<_> = contexts.iter().map(|c| gpui::KeyContext::parse(c).unwrap()).collect();
+            let (matches, _) = keymap.bindings_for_input(&[key.clone()], &stack);
+            assert_eq!(!matches.is_empty(), expected, "{contexts:?}");
+            if expected {
+                assert_eq!(matches[0].action().as_any().downcast_ref::<gpui_shell::action::ShellAction>().unwrap().id(), "browser.tab.new");
+            }
+        }
+    }
+
+    #[test]
+    fn explicit_globals_win_browser_conflicts_without_changing_other_contexts() {
+        use serde_json::json;
+        for global in [json!("app.help"), json!("tab.new"), json!({"command":"app.help"}), json!("terminal")] {
+            let bindings = super::parse(&json!({
+                "global": {"shift-ctrl-t": global},
+                "browser": {"ctrl-shift-t": "browser.tab.new"},
+                "terminal": {"ctrl-shift-t": "terminal.copy"},
+                "mod:editor": {"ctrl-shift-t": "pane.zoom"},
+                "layout:terminals": {"ctrl-shift-t": "pane.close"}
+            }).to_string()).unwrap();
+            let keymap = gpui::Keymap::new(bindings);
+            let key = gpui::Keystroke::parse("ctrl-shift-t").unwrap();
+            let stack: Vec<_> = ["Herdr", "HerdrBrowser"].iter()
+                .map(|c| gpui::KeyContext::parse(c).unwrap()).collect();
+            let (matches, _) = keymap.bindings_for_input(&[key.clone()], &stack);
+            if global == json!("terminal") {
+                assert!(matches.is_empty());
+            } else if global.is_object() {
+                let action = matches[0].action().as_any().downcast_ref::<super::CommandBinding>().unwrap();
+                assert_eq!(action.command().unwrap().0, "app.help");
+            } else {
+                assert_eq!(matches[0].action().as_any().downcast_ref::<gpui_shell::action::ShellAction>().unwrap().id(), global.as_str().unwrap());
+            }
+            for (context, expected) in [("Terminal", "terminal.copy"), ("mod=editor", "pane.zoom"), ("layout=terminals", "pane.close")] {
+                let stack: Vec<_> = ["Herdr", context].iter()
+                    .map(|c| gpui::KeyContext::parse(c).unwrap()).collect();
+                let (matches, _) = keymap.bindings_for_input(&[key.clone()], &stack);
+                assert_eq!(matches[0].action().as_any().downcast_ref::<gpui_shell::action::ShellAction>().unwrap().id(), expected);
+            }
+        }
+    }
+
+    #[test]
+    fn browser_object_actions_and_terminal_opt_out_keep_their_meaning() {
+        let bindings = super::parse(r#"{
+            "global":{"ctrl-t":"tab.new"},
+            "browser":{"ctrl-t":"terminal","ctrl-l":{"command":"browser.focus_address"}}
+        }"#).unwrap();
+        let keymap = gpui::Keymap::new(bindings);
+        let stack: Vec<_> = ["Herdr", "HerdrBrowser"].iter()
+            .map(|c| gpui::KeyContext::parse(c).unwrap()).collect();
+        // An explicit global wins even over a browser opt-out.
+        let (matches, _) = keymap.bindings_for_input(&[gpui::Keystroke::parse("ctrl-t").unwrap()], &stack);
+        assert_eq!(matches[0].action().as_any().downcast_ref::<gpui_shell::action::ShellAction>().unwrap().id(), "tab.new");
+        let (matches, _) = keymap.bindings_for_input(&[gpui::Keystroke::parse("ctrl-l").unwrap()], &stack);
+        let action = matches[0].action().as_any().downcast_ref::<super::CommandBinding>().unwrap();
+        assert_eq!(action.command().unwrap(), ("browser.focus_address".into(), serde_json::json!({})));
+
+        let keymap = gpui::Keymap::new(super::parse(r#"{"browser":{"ctrl-t":"terminal"}}"#).unwrap());
+        let (matches, _) = keymap.bindings_for_input(&[gpui::Keystroke::parse("ctrl-t").unwrap()], &stack);
+        assert!(matches.is_empty());
+    }
+
+    #[test]
+    fn shipped_browser_shortcuts_override_only_implicit_globals() {
+        for (text, modifier) in [
+            (include_str!("../defaults/keys.json"), "ctrl"),
+            (include_str!("../defaults/keys.macos.json"), "cmd"),
+        ] {
+            let keymap = gpui::Keymap::new(super::parse(text).unwrap());
+            let browser: Vec<_> = ["Herdr", "HerdrBrowser"].iter()
+                .map(|c| gpui::KeyContext::parse(c).unwrap()).collect();
+            for (key, expected) in [
+                (format!("{modifier}-t"), "browser.tab.new"),
+                (format!("{modifier}-w"), "browser.tab.close"),
+                ("ctrl-tab".into(), "browser.tab.next"),
+                ("ctrl-shift-tab".into(), "browser.tab.previous"),
+                (format!("{modifier}-l"), "browser.focus_address"),
+            ] {
+                let (matches, _) = keymap.bindings_for_input(&[gpui::Keystroke::parse(&key).unwrap()], &browser);
+                assert_eq!(matches[0].action().as_any().downcast_ref::<gpui_shell::action::ShellAction>().unwrap().id(), expected, "{key}");
+            }
+            // A whitespace edit makes globals explicit, even with unchanged actions.
+            let edited = gpui::Keymap::new(super::parse(&format!("{text}\n")).unwrap());
+            let (matches, _) = edited.bindings_for_input(&[gpui::Keystroke::parse("ctrl-tab").unwrap()], &browser);
+            assert_eq!(matches[0].action().as_any().downcast_ref::<gpui_shell::action::ShellAction>().unwrap().id(), "tab.next");
+            let terminal: Vec<_> = ["Herdr", "Terminal"].iter()
+                .map(|c| gpui::KeyContext::parse(c).unwrap()).collect();
+            let (matches, _) = keymap.bindings_for_input(&[gpui::Keystroke::parse("ctrl-tab").unwrap()], &terminal);
+            assert_eq!(matches[0].action().as_any().downcast_ref::<gpui_shell::action::ShellAction>().unwrap().id(), "tab.next");
+        }
+    }
+
     #[test]
     fn only_byte_identical_shipped_keys_are_upgraded() {
         let dir = std::env::temp_dir().join(format!("herdr-keys-migration-{}", std::process::id()));

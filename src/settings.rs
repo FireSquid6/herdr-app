@@ -5,6 +5,8 @@
 //! derived from the palette (dark or light by its background), so every
 //! theme is consistent and overrides only need what they change.
 
+pub mod browser;
+
 use crate::vt::Rgb;
 use gpui::{Hsla, Pixels, Rgba, px};
 use serde::{Deserialize, Serialize};
@@ -370,6 +372,12 @@ pub struct Person {
     /// How big the whole app is drawn (1 = as designed). The zoom keys change it.
     pub zoom: f32,
     pub sounds: Sounds,
+    /// Default page for newly created browser tabs.
+    pub browser_url: String,
+    /// HTTP(S) search URL containing a percent-encoded {query} placeholder.
+    pub browser_search: String,
+    /// Trusted mod around the native core-owned page surface.
+    pub browser_chrome: String,
     /// The herdr-core to use, when it isn't where Herdr looks (core_bin.rs).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub core: Option<String>,
@@ -459,6 +467,9 @@ impl Default for Person {
         Person {
             zoom: 1.0,
             sounds: Sounds::default(),
+            browser_url: browser::DEFAULT_URL.into(),
+            browser_search: browser::DEFAULT_SEARCH.into(),
+            browser_chrome: "browser-chrome".into(),
             core: None,
             font: None,
             font_size: None,

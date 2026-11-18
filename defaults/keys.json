@@ -60,6 +60,13 @@
     "f2": "tab.rename",
     "shift-f2": "space.rename"
   },
+  "browser": {
+    "ctrl-t": "browser.tab.new",
+    "ctrl-w": "browser.tab.close",
+    "ctrl-tab": "browser.tab.next",
+    "ctrl-shift-tab": "browser.tab.previous",
+    "ctrl-l": "browser.focus_address"
+  },
   "terminal": {
     "ctrl-backspace": "send:\u0017",
     "ctrl-left": "send:\u001bb",

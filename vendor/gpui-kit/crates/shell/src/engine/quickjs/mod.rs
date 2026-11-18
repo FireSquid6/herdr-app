@@ -2025,7 +2025,13 @@ impl ShellRuntime {
     /// while the previous runtime is alive. Its copies keep it until they finish
     /// closing, and it is freed when the last of them drops it.
     pub fn replace_default(cx: &mut App) -> Result<Rc<Self>> {
-        let runtime = Self::new_isolated_with_components(FrozenComponentRegistry::default())?;
+        Self::replace_default_with_components(cx, FrozenComponentRegistry::default())
+    }
+
+    /// Replace a host VM while retaining its application-owned native component
+    /// registry. Old copies can finish closing against their previous runtime.
+    pub fn replace_default_with_components(cx: &mut App, components: FrozenComponentRegistry) -> Result<Rc<Self>> {
+        let runtime = Self::new_isolated_with_components(components)?;
         runtime.set_global(cx);
         Ok(runtime)
     }

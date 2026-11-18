@@ -2,7 +2,10 @@
 //!
 //! Every asynchronous result retains the complete controller identity. This module
 //! deliberately does not decide which core owns a workspace; the window supplies it.
+pub mod saved;
 pub mod panel;
+pub mod chrome;
+pub mod viewer;
 use anyhow::{Result, bail};
 use base64::Engine as _;
 use std::sync::Arc;
